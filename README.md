@@ -6,7 +6,7 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
-> **All data is synthetic.** Patients were generated with [Synthea](https://github.com/synthetichealth/synthea). No real patient information (PHI) was used at any point.
+> **All data is synthetic.** Patients were generated with [Synthea](https://github.com/synthetichealth/synthea), and no real patient information (PHI) was used at any point. The legacy files in `data/` include SSN, driver's license and passport columns because Synthea generates them; their values are fake, and the pipeline deliberately drops these columns at ingestion (see *Data minimization* below).
 
 ---
 
