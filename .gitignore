@@ -1,0 +1,29 @@
+# ------------------------------------------------------------
+# .gitignore - files Git should NOT upload to GitHub
+# ------------------------------------------------------------
+
+# Python virtual environment (rebuilt with: pip install -r requirements.txt)
+.venv/
+venv/
+
+# Python cache files (created automatically when scripts run)
+__pycache__/
+*.pyc
+
+# Secrets - API keys and passwords must never be uploaded
+.env
+*.env
+
+# Pipeline outputs - regenerated every time the pipeline runs
+# (FHIR bundles, logs, crosswalk, extracted target CSVs)
+output/
+
+# Office and Power BI temporary / lock files
+~$*
+*.tmp
+
+# Editor and operating-system clutter
+.vscode/
+Thumbs.db
+desktop.ini
+.DS_Store

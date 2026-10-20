@@ -1,0 +1,10 @@
+table,record_id,column,error_type,original_value,planted_value,expected_handling
+patients,7bbaa47e-d029-bf4f-3237-ddd955c0a584,BIRTHDATE,missing_required_value,2019-10-18,,reject
+patients,f1f05592-2511-92df-6f3e-c64ac3152b26,BIRTHDATE,missing_required_value,1983-06-25,,reject
+patients,c4d5d909-433c-fccf-5984-4213b88417cb,BIRTHDATE,nonstandard_date_format,1978-07-01,07/01/1978,fix (convert to YYYY-MM-DD)
+patients,307ab11f-ff8e-63d6-fb00-b97e91b2234e,GENDER,invalid_code,F,U,reject
+patients,2778ce03-280e-9b54-4999-2af75968ad73,ADDRESS,missing_optional_value,290 Powlowski Flat,,load + flag as incomplete
+patients,7a58a941-bd27-086e-d622-38e5917d0df5,ADDRESS,missing_optional_value,806 Koss Meadow Apt 46,,load + flag as incomplete
+patients,3c4b499b-090b-c6fa-28d7-b56c6056d0a2,(whole row),duplicate_record,,row appears twice,"remove duplicate, keep one"
+encounters,8e2eb664-7294-85d9-23c4-b940302a738a,PATIENT,orphan_reference,8e2eb664-7294-85d9-8234-0b687f788d50,00000000-0000-0000-0000-000000000000,reject
+conditions,row 1510 (patient e95ac678-666f-e6f5-eb76-c0273233acb1),CODE,missing_required_value,160904001,,reject
