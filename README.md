@@ -4,6 +4,8 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result:** 5,329 source rows, 100% accounted for · **5,327 migrated** (the other two: 1 duplicate removed, 1 record archived with a documented reason) · **44,765 of 44,765 field values matched** · 9 of 9 planted data defects caught, then corrected or archived.
 
+> **Scope:** this is **Phase 1** of the migration: the core records (Patient, Encounter, Condition) that every other record depends on. Later phases are planned below in [Scope and phases](#scope-and-phases).
+
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
 > **All data is synthetic.** Patients were generated with [Synthea](https://github.com/synthetichealth/synthea), and no real patient information (PHI) was used at any point. The legacy files in `data/` include SSN, driver's license and passport columns because Synthea generates them; their values are fake, and the pipeline deliberately drops these columns at ingestion (see *Data minimization* below).
@@ -125,6 +127,21 @@ The worklist ranks problems by how many records each one blocks, so the **5 root
 ![Reconciliation dashboard before remediation](docs/dashboard_before_remediation.png)
 
 </details>
+
+---
+## Scope and phases
+
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further.
+
+| Phase | FHIR resources | Source data | Status |
+|---|---|---|---|
+| **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
+| **2** | Practitioner, AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | Planned |
+| **3** | ServiceRequest, DiagnosticReport, MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need order, lab-result and nursing data from the source EHR | Planned |
+
+**Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
+
+**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create, read it back and reconcile it. Practitioner is next, because each encounter's `PROVIDER` field already points to one.
 
 ---
 
