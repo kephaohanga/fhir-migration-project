@@ -143,6 +143,20 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 **How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create, read it back and reconcile it. Practitioner is next, because each encounter's `PROVIDER` field already points to one.
 
+### Next: converting into a system that already has data
+
+Phase 1 loads into an **empty** FHIR server. Many real conversions are different: a practice joining a larger health system's shared EHR (for example, an Epic Community Connect arrangement) moves into a system that **already holds** many of the same patients and providers. The next steps make the project reflect that. They are planned work, not yet built.
+
+| Step | What changes | Why it matters |
+|---|---|---|
+| **1. Patient matching** | Pre-load "existing" patients on the server, some of them the same people as legacy patients with realistic differences (nickname, typo, new address). Before loading, match each legacy patient on name, birth date, sex, address and phone: **confident match** → link to the existing record; **possible match** → send to an HIM review worklist; **no match** → create a new patient. | Linking to the existing record prevents duplicate charts. Sending uncertain matches to a person prevents **overlays** (two different people merged into one chart). |
+| **2. Provider matching by NPI** | Add Practitioner with a crosswalk from legacy provider ID to NPI to the target provider record, linking to providers who already exist. Synthetic NPIs will be used if Synthea does not provide them. | Every encounter and appointment points to a provider. A missing or wrong provider breaks scheduling and billing. |
+| **3. Appointment conversion** | Add synthetic future appointments (FHIR Appointment) with a **visit-type mapping table** (legacy type → new type) and a report comparing appointment counts per provider per day, old vs. new. | Schedulers need to check converted schedules before go-live. A count report shows them exactly where to look. |
+| **4. Mock conversion tracking** | Add a `run_id` to the load and issue logs, and a view comparing runs (for example, Mock 1: 9 issues → Mock 2: 4 → Mock 3: 0). | Real conversions are rehearsed several times. Tracking each run shows the data getting cleaner before go-live. |
+| **5. Conversion cut-off rule** | Convert active and recent data (for example, the last 3 years), and report older history as **kept in the legacy system**, not missing. | When the old systems stay available for historical data, not everything needs to move. The reconciliation must still account for every row. |
+
+**Reconciliation stays the same idea:** for patients, *linked + created + under review = all legacy patients*, with no unexplained rows.
+
 ---
 
 ## How to run it
