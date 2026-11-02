@@ -78,7 +78,9 @@ flowchart LR
 | 11 | `sql/10_reconciliation.sql` | Row-level and field-level reconciliation views and reports |
 | 12 | `sql/11_dashboard_views.sql`, `powerbi/` | Dashboard views and the Power BI reconciliation report |
 | 13 | `src/export_worklist.py`, `sql/12_remediation.sql` | Remediation worklist for staff and the log of every correction's outcome |
-
+| 14 | `src/plant_provider_errors.py` | Phase 2: plants 7 provider defects (misspelt and wrong names, invalid gender and NPI, duplicate) |
+| 15 | `src/phase2_practitioner.py` | Phase 2: stages, validates against the credentialing roster, loads (conditional update) and reads back Practitioners |
+| 16 | `sql/20_practitioner_reconciliation.sql` | Phase 2: row, field and visit-coverage reconciliation |
 ---
 
 ## Results
@@ -128,15 +130,29 @@ The worklist ranks problems by how many records each one blocks, so the **5 root
 
 </details>
 
+### Phase 2, step 1: Practitioner (providers)
+
+Provider names were checked against a credentialing roster, the trusted source for names. Seven realistic defects were planted in the legacy provider export.
+
+| Check | Result |
+|---|---|
+| Row reconciliation | 185 legacy rows = 183 migrated + 1 rejected + 1 duplicate removed: **PASS** |
+| Planted defects | **7 of 7 caught** |
+| Field reconciliation | **2,196 of 2,196** values matched (12 fields, including NPI) |
+| Names vs. credentialing roster | 3 misspellings corrected automatically (similarity 0.95–0.98); 1 name that did not match at all (similarity 0.14) rejected for Credentialing review |
+| NPI | Stored as the official identifier (`http://hl7.org/fhir/sid/us-npi`); 1 invalid NPI (9 digits) flagged and omitted |
+| Visit coverage | 150 providers are used by migrated visits; 2 visits wait for the rejected provider's review |
+
 ---
 ## Scope and phases
 
 Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further.
+**Phase 2** has started, beginning with Practitioner.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
-| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | Planned |
+| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 183 migrated, 2 explained; 2,196 of 2,196 values matched)|
 | **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need synthetic data or the source EHR's scheduling, referral, authorization, document, lab and nursing data | Planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.

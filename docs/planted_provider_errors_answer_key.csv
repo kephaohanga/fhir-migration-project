@@ -1,0 +1,8 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+cbea90d6-e58e-36aa-ba86-2bdefcea922b,misspelt_name_swap,NAME,Lincoln623 Trantow673,Linconl623 Trantow673,R-PR02,Fix
+6a25161a-f72b-3900-b748-947f45d37394,misspelt_name_drop,NAME,Chet188 Waters156,Chet188 Water156,R-PR02,Fix
+25f85996-d330-3e82-a49b-07f1cfe46de4,misspelt_name_double,NAME,Kurtis994 O'Conner199,Kurtis994 O'Conneer199,R-PR02,Fix
+b118c7be-07e0-3cdc-a0b9-e767141de965,wrong_name,NAME,Waylon572 Lindgren255,Renaldo199 Wilkinson796,R-PR02,Reject
+655bd187-2791-3ad6-a716-29e24bcf699d,invalid_gender,GENDER,M,X,R-PR03,Flag
+f083c666-ae6d-3f0c-af98-6fa0e9640bbb,duplicate_record,(whole row),,row appears twice,R-PR04,Fix
+c7ecbd5f-8509-3d71-9a1f-0127a6be904e,invalid_npi,NPI,9999925495,999992549,R-PR06,Flag
