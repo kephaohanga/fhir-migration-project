@@ -4,7 +4,7 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result:** 5,329 source rows, 100% accounted for · **5,327 migrated** (the other two: 1 duplicate removed, 1 record archived with a documented reason) · **44,765 of 44,765 field values matched** · 9 of 9 planted data defects caught, then corrected or archived.
 
-> **Scope:** this is **Phase 1** of the migration: the core records (Patient, Encounter, Condition) that every other record depends on. Later phases are planned below in [Scope and phases](#scope-and-phases).
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete, and **Phase 2** has started with Practitioner. Later phases are planned below in [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -171,6 +171,8 @@ Planned for this project:
 
 - **A/R runout report:** legacy open balances by payer and by age (0–30, 31–60, 61–90, 90+ days), tracked until they reach zero.
 - **Optional billing history:** load Synthea's `claims.csv` and `claims_transactions.csv` as read-only **ExplanationOfBenefit** resources, so past billing is visible. This is history, not open balances.
+- **Closed claims only:** if billing history is loaded, only claims that are **closed** in the legacy system move: paid, adjusted to a zero balance, or final-denied and written off (for example, after the timely filing limit). A claim that is still open, such as one denied for a credentialing issue while the appeal or rebilling window is still open, stays in the legacy system until it closes. A reconciliation check confirms that no open balance was migrated.
+- **A migration reject is not a payer denial:** a record rejected by this pipeline (for example, the provider whose name did not match the credentialing roster) has a **data** problem that is fixed or archived. It does not change whether any claim is paid.
 
 ### Next: converting into a system that already has data
 
