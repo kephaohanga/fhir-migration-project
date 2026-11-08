@@ -8,7 +8,9 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result, Phase 2 (clinic structure):** 1 Organization, 1 Location and **184 PractitionerRoles** (one per migrated provider) · **1,126 of 1,126 field values matched** · every role linked to its own practitioner and to the clinic · 184 of 184 specialties coded to the NUCC provider taxonomy.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has started: Practitioner and the clinic structure (Organization, Location, PractitionerRole) are complete; linking each visit to its provider and location is next. Later phases are planned below in [Scope and phases](#scope-and-phases).
+**Result, Phase 2 (visit links):** all **3,563 migrated visits** updated in place to point to their practitioner, the clinic location and the clinic organization · **14,252 of 14,252 link values matched** · every visit linked to the provider in its legacy record · **Phase 1 regression test still 44,765 of 44,765**: nothing else changed.
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has completed its clinic-structure group (Practitioner, Organization, Location, PractitionerRole) and linked every visit to it, so each record now connects: patient → visit → provider → role → clinic. Insurance (Coverage) is next. Later phases are planned below in [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -87,6 +89,8 @@ flowchart LR
 | 16 | `sql/20_practitioner_reconciliation.sql` | Phase 2: row, field and visit-coverage reconciliation |
 | 17 | `src/phase2_clinic_structure.py`, `docs/specialty_map.csv` | Phase 2: loads the clinic Organization and Location, then one PractitionerRole per provider with the specialty mapped to the NUCC taxonomy |
 | 18 | `sql/21_clinic_structure_reconciliation.sql` | Phase 2: role row reconciliation, field comparison, link integrity and specialty-coding coverage |
+| 19 | `src/phase2_encounter_links.py` | Phase 2: updates every migrated Encounter in place (read, modify, write with `ifMatch`) to link it to its Practitioner, Location and Organization |
+| 20 | `sql/22_encounter_link_reconciliation.sql` | Phase 2: link coverage, field comparison, correct-provider check and role consistency; then the Phase 1 reconciliation is re-run as a regression test |
 
 ---
 
@@ -174,15 +178,35 @@ The NPI is stored as the provider's official identifier (`http://hl7.org/fhir/si
 
 The clinic's name, address and phone number are **fictional** reference data defined in the script, since all data in this project is synthetic.
 
+### Phase 2, step 3: Linking visits to providers and the clinic
+
+The Phase 1 encounters were loaded before any Practitioner existed, so they did not yet say **who** saw the patient or **where**. Rather than reloading them, each encounter was **updated in place**:
+
+1. **Read** the encounter exactly as the server holds it.
+2. **Modify** only three fields: `participant` (the Practitioner, as primary performer), `location` (the clinic Location) and `serviceProvider` (the clinic Organization). Every other field is left untouched.
+3. **Write** it back with `ifMatch` on the version just read (*optimistic locking*): the server saves it only if nobody changed the encounter in between, so no other change can be overwritten unnoticed.
+
+The provider comes from the legacy encounter's `PROVIDER` column, translated to the FHIR Practitioner through the practitioner crosswalk.
+
+| Check | Result |
+|---|---|
+| Coverage | **3,563 of 3,563** migrated visits fully linked; 0 without a provider: **PASS** |
+| Field reconciliation | **14,252 of 14,252** link values matched (3,563 visits × 4 link fields) |
+| Correct provider | Every visit points to the practitioner migrated from the provider **in its own legacy record**: 0 wrong links |
+| Cross-resource consistency | **3,563 of 3,563** visits: the visit's practitioner holds a PractitionerRole at the visit's location |
+| **Regression test** | Phase 1 re-extracted and re-reconciled afterwards: still **44,765 of 44,765** values matched and every row accounted for, proving the update changed only the links |
+
+The Practitioner remediation mattered here: without it, the 2 visits of the provider rejected for a wrong name would have had no practitioner to link to.
+
 ---
 ## Scope and phases
 
-Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated) and the clinic structure are done.
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure and the visit links are done.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
-| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). Visit links next |
+| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage next |
 | **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need synthetic data or the source EHR's scheduling, referral, authorization, document, lab and nursing data | Planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
@@ -191,7 +215,7 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 **Why Phase 3 adds appointments, referrals and authorizations:** these are the "open work" a clinic must carry across on go-live day: future appointments, referrals still in progress, and prior authorizations already approved or pending. A missing prior authorization is a leading cause of claim denials, so authorizations must not be lost in the switch.
 
-**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. Next, the Phase 1 encounters are updated in place so each visit points to its practitioner (`Encounter.participant`) and to the clinic location (`Encounter.location`), with a reconciliation proving every visit links to the right provider.
+**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. The Phase 1 encounters were then updated in place so each visit points to its practitioner, the clinic location and the clinic organization, and a regression test confirmed Phase 1 was otherwise unchanged. Insurance (**Coverage**) comes next, because pre-registration and clean claims depend on it.
 
 ### Billing and balances
 
@@ -301,6 +325,18 @@ python src\phase2_clinic_structure.py             # clinic + all roles, then rea
 
 Then open `sql\21_clinic_structure_reconciliation.sql` in SSMS and press **F5**. Run this step after Practitioner: every role points to a migrated practitioner.
 
+### 19–20. Phase 2: Visit links
+
+```powershell
+python src\phase2_encounter_links.py --limit 1    # one bundle of 50 encounters (a test)
+python src\phase2_encounter_links.py              # all encounters, then read back
+```
+
+1. Open `sql\22_encounter_link_reconciliation.sql` in SSMS and press **F5**.
+2. **Regression test:** run `python src\extract_fhir.py`, then `sql\10_reconciliation.sql`. Phase 1 must still show every value matched.
+
+Run this step after the clinic structure: each visit points to the clinic's Location and Organization.
+
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
 
 ---
@@ -331,6 +367,7 @@ fhir-migration-project/
 │   ├── 12_remediation.sql
 │   ├── 20_practitioner_reconciliation.sql
 │   ├── 21_clinic_structure_reconciliation.sql
+│   ├── 22_encounter_link_reconciliation.sql
 │   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
@@ -343,7 +380,8 @@ fhir-migration-project/
 │   ├── export_worklist.py
 │   ├── plant_provider_errors.py
 │   ├── phase2_practitioner.py
-│   └── phase2_clinic_structure.py
+│   ├── phase2_clinic_structure.py
+│   └── phase2_encounter_links.py
 ├── requirements.txt
 └── README.md
 ```
@@ -364,6 +402,8 @@ fhir-migration-project/
 - **Idempotent loads.** Conditional create (Phase 1) and conditional update (Practitioner) let the load be rerun safely after a failure or after corrections, without duplicates.
 - **One clinic.** Synthea assigns each provider to their own organization (184 providers, 184 organizations, at most 1 provider per organization, verified in SQL). These values are simulator artifacts, so all providers are mapped to a single clinic Organization and Location. Legacy organization IDs are kept in `stg`/`cur` for audit only.
 - **Profile before mapping.** Specialty values were profiled in SQL before the code mapping was finalized (all 184 providers are `GENERAL PRACTICE`). The mapping lives in a reviewable table (`docs/specialty_map.csv`), not in code, and any value missing from it is loaded as text and flagged rather than dropped.
+- **Update in place, never reload.** Records already migrated and proven are changed with read, modify, write and `ifMatch` (optimistic locking), touching only the new fields.
+- **Regression testing.** After any change to migrated records, the earlier reconciliation is re-run; Phase 1 still matched 44,765 of 44,765 after the visit links were added.
 - **Prove links, not just counts.** The clinic-structure reconciliation checks that each role points to the practitioner migrated from the *same* legacy provider, so a role attached to the wrong person would fail even if every count matched.
 - **Exact comparison.** Field reconciliation uses a binary collation and a NULL-safe comparison, and compares against the corrected values, so differences in case, whitespace or unapproved changes are not hidden.
 - **Data minimization (HIPAA).** SSN, driver's license and passport numbers are dropped at ingestion because the target does not need them.
@@ -381,9 +421,10 @@ fhir-migration-project/
 | Data-quality rules, exception reporting | `transform.py`, `phase2_practitioner.py`, `etl.issue_log` |
 | Validation against a reference source (fuzzy name matching) | `phase2_practitioner.py` (credentialing roster, similarity threshold) |
 | Code mapping to a national terminology (NUCC provider taxonomy) | `phase2_clinic_structure.py`, `docs/specialty_map.csv` |
-| Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql` (role → practitioner, organization, location) |
+| Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` (visit → practitioner → role → clinic) |
+| Safe updates to live records (optimistic locking), regression testing | `phase2_encounter_links.py` (`ifMatch`), Phase 1 reconciliation re-run |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 
