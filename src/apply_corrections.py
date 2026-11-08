@@ -9,6 +9,10 @@ How it works
   cur.*   "curated" copy = stg + approved corrections (rebuilt every run)
   etl.corrections  audit trail: who changed what, when, why, old -> new value
 
+Tables covered
+  Phase 1: patients, encounters, conditions
+  Phase 2: providers  (only once src\\phase2_practitioner.py has created stg.providers)
+
 Corrections come from remediation/corrections.csv, one row per fix:
   table_name, source_row, record_key, rule_id, field, corrected_value,
   disposition (Correct | Archive), reason, corrected_by, corrected_date
@@ -17,7 +21,9 @@ Corrections come from remediation/corrections.csv, one row per fix:
               kept in the read-only legacy archive (the reason is required)
 
 Run from the project folder:  python src\\apply_corrections.py
-Then run src\\transform.py - it now reads cur.* instead of stg.*
+  Phase 1: then run src\\transform.py - it reads cur.* instead of stg.*
+  Phase 2: src\\phase2_practitioner.py runs this script by itself, so there is
+           no separate step for providers.
 Safe to re-run: cur.* and etl.corrections are rebuilt from the CSV every time.
 """
 
@@ -32,7 +38,9 @@ SERVER = "localhost"
 DRIVER = "ODBC Driver 17 for SQL Server"
 DATABASE = "FhirMigration"
 CORRECTIONS_CSV = Path("remediation/corrections.csv")
-TABLES = ("patients", "encounters", "conditions")
+
+PHASE1_TABLES = ("patients", "encounters", "conditions")
+PHASE2_TABLES = ("providers",)          # included only when the stg table exists
 
 CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "corrected_value",
               "disposition", "reason", "corrected_by", "corrected_date"]
@@ -107,14 +115,30 @@ def condition_key(row):
     return "_".join(str(row.get(c) or "") for c in ("PATIENT", "ENCOUNTER", "CODE", "START"))
 
 
-def main():
+def record_key(table, row):
+    """The business key staff see on the worklist: Id for most tables."""
+    return condition_key(row) if table == "conditions" else row.get("Id")
+
+
+def available_tables(cur):
+    """Phase 1 tables always; Phase 2 tables only once they have been staged."""
+    tables = list(PHASE1_TABLES)
+    for table in PHASE2_TABLES:
+        if cur.execute(f"SELECT OBJECT_ID('stg.{table}');").fetchone()[0] is not None:
+            tables.append(table)
+    return tables
+
+
+def main(show_next=True):
+    """Returns True if cur.* was rebuilt, False if corrections.csv has errors."""
     corrections = read_corrections()
     conn = connect()
     cur = conn.cursor()
+    tables = available_tables(cur)
 
     # Column list and rows of each staging table, so every correction can be checked
     columns, staging = {}, {}
-    for table in TABLES:
+    for table in tables:
         cur.execute(f"SELECT * FROM stg.{table};")
         cols = [c[0] for c in cur.description]
         columns[table] = set(cols)
@@ -131,14 +155,15 @@ def main():
         except ValueError:
             errors.append(f"{where}: source_row '{c.get('source_row')}' is not a number")
             continue
-        if table not in TABLES:
-            errors.append(f"{where}: table_name '{table}' must be patients, encounters or conditions")
+        if table not in tables:
+            hint = " (run src\\phase2_practitioner.py first)" if table in PHASE2_TABLES else ""
+            errors.append(f"{where}: table_name '{table}' must be one of: {', '.join(tables)}{hint}")
             continue
         row = staging[table].get(src)
         if row is None:
             errors.append(f"{where}: {table} has no source_row {src}")
             continue
-        actual_key = condition_key(row) if table == "conditions" else row.get("Id")
+        actual_key = record_key(table, row)
         if c.get("record_key") and c["record_key"] != actual_key:
             errors.append(f"{where}: record_key does not match {table} source_row {src} "
                           f"(expected {actual_key})")
@@ -184,11 +209,12 @@ def main():
         })
 
     if errors:
+        conn.close()
         print("\nCorrections NOT applied - fix these lines in remediation/corrections.csv first:")
         for e in errors:
             print("  - " + e)
         print("\nNothing was changed. cur.* still holds the previous run.")
-        return
+        return False
 
     # Keep only the last correction per table + row + field
     accepted = [accepted[i] for i in sorted(seen.values())]
@@ -208,7 +234,7 @@ def main():
 
     # ---- 2. Curated layer: cur.* = copy of stg.* + approved corrections ----
     cur.execute("IF SCHEMA_ID('cur') IS NULL EXEC('CREATE SCHEMA cur');")
-    for table in TABLES:
+    for table in tables:
         cur.execute(f"DROP TABLE IF EXISTS cur.{table};")
         cur.execute(f"SELECT * INTO cur.{table} FROM stg.{table};")
     applied = 0
@@ -231,10 +257,12 @@ def main():
                   + (f"  [{a['note']}]" if a["note"] else ""))
         else:
             print(f"  {a['table_name']:<10} row {a['source_row']:<5} ARCHIVE - {a['reason']}")
-    print("\ncur.patients, cur.encounters, cur.conditions rebuilt (raw stg.* tables unchanged)")
+    print(f"\n{', '.join('cur.' + t for t in tables)} rebuilt (raw stg.* tables unchanged)")
     print("Audit trail -> etl.corrections")
-    print("Next: python src\\transform.py")
+    if show_next:
+        print("Next: python src\\transform.py (Phase 1) or python src\\phase2_practitioner.py (Phase 2)")
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(0 if main() else 1)

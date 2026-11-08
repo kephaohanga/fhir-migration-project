@@ -70,11 +70,16 @@ GO
 /* -----------------------------------------------------------------------------
    3. LINK COVERAGE: every migrated encounter's PROVIDER should be a migrated
    practitioner. LEFT JOIN + IS NULL finds the ones that are not.
+   An archived provider is a documented decision, so it gets its own reason.
    -------------------------------------------------------------------------- */
 CREATE OR ALTER VIEW rpt.v_encounter_provider_coverage AS
 SELECT e.Id       AS legacy_encounter_id,
        e.PROVIDER AS legacy_provider_id,
        CASE WHEN e.PROVIDER IS NULL THEN 'Encounter has no provider'
+            WHEN EXISTS (SELECT 1 FROM etl.corrections AS k
+                         WHERE k.table_name = 'providers' AND k.record_key = e.PROVIDER
+                           AND k.disposition = 'Archive')
+                 THEN 'Provider archived - visit keeps legacy provider only'
             WHEN EXISTS (SELECT 1 FROM etl.practitioner_issue_log AS i
                          WHERE i.record_key = e.PROVIDER AND i.action = 'Reject')
                  THEN 'Provider rejected - awaiting Credentialing review'
@@ -120,8 +125,9 @@ LEFT JOIN tgt.practitioners AS t ON t.fhir_id = x.fhir_id
 WHERE i.rule_id = 'R-PR02';
 
 -- 3. Migrated visits whose provider is not on the server, by reason.
---    Expected: only the visits of the provider rejected for a wrong name
---    (0 if that provider has no migrated visits). Anything else is a finding.
+--    Before remediation: only the visits of the provider rejected for a wrong name.
+--    After remediation:  NO rows (provider corrected), or only
+--    'Provider archived' rows (a documented decision). Anything else is a finding.
 SELECT problem, COUNT(*) AS visits
 FROM rpt.v_encounter_provider_coverage
 GROUP BY problem;

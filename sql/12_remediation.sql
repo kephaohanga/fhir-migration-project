@@ -1,6 +1,7 @@
 /* =============================================================================
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
+   Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -12,6 +13,7 @@
    Run by src/export_worklist.py (which also writes remediation/worklist.csv),
    or open in SSMS and press F5. Requires src/apply_corrections.py and
    src/transform.py to have run at least once. Safe to re-run.
+   Phase 2 rows appear once src/phase2_practitioner.py has run.
    ========================================================================== */
 
 USE FhirMigration;
@@ -39,9 +41,35 @@ CREATE TABLE etl.corrections (
 );
 GO
 
+-- Phase 2 tables are created by src/phase2_practitioner.py. If Phase 2 has not
+-- run yet, create EMPTY placeholders so the views below can still be created.
+-- (The script replaces them with the real tables the first time it runs.)
+IF OBJECT_ID('etl.practitioner_issue_log') IS NULL
+CREATE TABLE etl.practitioner_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.practitioner_crosswalk') IS NULL
+CREATE TABLE etl.practitioner_crosswalk (
+    legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL, server_status NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.providers') IS NULL
+CREATE TABLE cur.providers (
+    Id NVARCHAR(500) NULL, NAME NVARCHAR(500) NULL, GENDER NVARCHAR(500) NULL,
+    NPI NVARCHAR(500) NULL, source_row INT NULL
+);
+GO
+
 /* -----------------------------------------------------------------------------
    WORKLIST: direct rejects only. A cascade reject is a symptom; fixing its
    root cause (usually the patient) releases it automatically.
+   Providers: rejects, plus the two flags that need Credentialing to supply
+   data (R-PR03 gender, R-PR06 NPI). For a rejected provider, "blocked" counts
+   the migrated visits that are waiting for that provider.
    -------------------------------------------------------------------------- */
 CREATE OR ALTER VIEW rpt.v_remediation_worklist AS
 WITH roots AS (
@@ -114,9 +142,59 @@ detail AS (
     LEFT JOIN cur.patients   AS pe ON pe.Id = e.PATIENT AND pe.source_row = (SELECT MIN(source_row) FROM cur.patients WHERE Id = e.PATIENT)
     LEFT JOIN cur.patients   AS pc ON pc.Id = c.PATIENT AND pc.source_row = (SELECT MIN(source_row) FROM cur.patients WHERE Id = c.PATIENT)
     LEFT JOIN blocked        AS b  ON r.table_name = 'patients'   AND b.blocked_by = r.record_key
+),
+-- ---------- Phase 2: providers ----------
+provider_visits AS (            -- migrated visits per legacy provider
+    SELECT e.PROVIDER AS provider_id, COUNT(*) AS visits
+    FROM cur.encounters AS e
+    JOIN etl.fhir_crosswalk AS xe
+      ON xe.resource_type = 'Encounter' AND xe.legacy_id = e.Id AND xe.fhir_id IS NOT NULL
+    GROUP BY e.PROVIDER
+),
+provider_detail AS (
+    SELECT CAST(N'providers' AS NVARCHAR(50))                           AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-PR02' THEN 'NAME'   WHEN 'R-PR03' THEN 'GENDER'
+                          WHEN 'R-PR06' THEN 'NPI'    ELSE 'Id' END     AS field,
+           CAST(NULL AS NVARCHAR(500))                                  AS patient_id,
+           CAST(NULL AS NVARCHAR(500))                                  AS patient_name,
+           CONCAT(N'Provider on file: ', ISNULL(pr.NAME, N'(blank)'),
+                  N' | NPI on file: ',   ISNULL(pr.NPI, N'(blank)'),
+                  N' | gender on file: ', ISNULL(pr.GENDER, N'(blank)')) AS context,
+           CASE i.rule_id WHEN 'R-PR02' THEN pr.NAME  WHEN 'R-PR03' THEN pr.GENDER
+                          WHEN 'R-PR06' THEN pr.NPI   ELSE pr.Id END    AS current_value,
+           CASE WHEN i.action = 'Reject' THEN ISNULL(pv.visits, 0) ELSE 0 END AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           N'Credentialing / Provider Enrollment'                       AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-PR01' THEN 'Identify the provider, or archive if it cannot be identified'
+               WHEN 'R-PR02' THEN 'Confirm the provider''s legal name in the credentialing file, or archive if this is not a real provider'
+               WHEN 'R-PR03' THEN 'Enter gender (M or F) from the credentialing file'
+               WHEN 'R-PR05' THEN 'Add the provider to the credentialing roster, or archive'
+               WHEN 'R-PR06' THEN 'Enter the 10-digit NPI from the credentialing file (NPPES)'
+           END                                                          AS what_is_needed
+    FROM etl.practitioner_issue_log AS i
+    LEFT JOIN cur.providers    AS pr ON pr.source_row = TRY_CAST(i.source_row AS INT)
+    LEFT JOIN provider_visits  AS pv ON pv.provider_id = i.record_key
+    WHERE i.action = 'Reject' OR i.rule_id IN ('R-PR03', 'R-PR06')
+),
+all_detail AS (
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM provider_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
-                                   CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2 ELSE 3 END,
+                                   CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
+                                                     WHEN 'conditions' THEN 3 ELSE 4 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -130,7 +208,7 @@ SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions D
        d.blocked_encounters, d.blocked_conditions,
        d.blocked_encounters + d.blocked_conditions                      AS records_blocked,
        d.suggested_owner, d.what_is_needed
-FROM detail AS d
+FROM all_detail AS d
 OUTER APPLY (SELECT TOP (1) disposition, applied_at
              FROM etl.corrections AS k
              WHERE k.table_name = d.table_name AND k.source_row = d.source_row
@@ -147,29 +225,40 @@ WITH keyed AS (
                WHEN 'patients'   THEN p.Id
                WHEN 'encounters' THEN e.Id
                WHEN 'conditions' THEN CONCAT(c.PATIENT, '_', c.ENCOUNTER, '_', c.CODE, '_', c.START)
+               WHEN 'providers'  THEN pr.Id
            END AS current_key,
-           CASE k.table_name WHEN 'patients' THEN 'Patient'
-                             WHEN 'encounters' THEN 'Encounter' ELSE 'Condition' END AS resource_type
+           CASE k.table_name WHEN 'patients'   THEN 'Patient'
+                             WHEN 'encounters' THEN 'Encounter'
+                             WHEN 'providers'  THEN 'Practitioner'
+                             ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
-    LEFT JOIN cur.patients   AS p ON k.table_name = 'patients'   AND p.source_row = k.source_row
-    LEFT JOIN cur.encounters AS e ON k.table_name = 'encounters' AND e.source_row = k.source_row
-    LEFT JOIN cur.conditions AS c ON k.table_name = 'conditions' AND c.source_row = k.source_row
+    LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
+    LEFT JOIN cur.encounters AS e  ON k.table_name = 'encounters' AND e.source_row  = k.source_row
+    LEFT JOIN cur.conditions AS c  ON k.table_name = 'conditions' AND c.source_row  = k.source_row
+    LEFT JOIN cur.providers  AS pr ON k.table_name = 'providers'  AND pr.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       x.fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
                         WHERE i.table_name = k.table_name AND i.source_row = k.source_row
                           AND i.action = 'Reject') THEN 'Still failing - review'
-           WHEN x.fhir_id IS NOT NULL THEN 'Resolved - migrated'
+           WHEN EXISTS (SELECT 1 FROM etl.practitioner_issue_log AS i
+                        WHERE k.table_name = 'providers'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
 FROM keyed AS k
 LEFT JOIN etl.fhir_crosswalk AS x
-       ON x.resource_type = k.resource_type AND x.legacy_id = k.current_key;
+       ON x.resource_type = k.resource_type AND x.legacy_id = k.current_key
+LEFT JOIN etl.practitioner_crosswalk AS xp
+       ON k.resource_type = 'Practitioner' AND xp.legacy_id = k.current_key AND xp.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------

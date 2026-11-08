@@ -9,19 +9,27 @@ Two files are used, as in a real clinic:
   data/legacy/providers.csv        the CREDENTIALING ROSTER: the source of truth
                                    for provider names, used to catch misspellings
 
-It follows the same pattern as Phase 1, in four stages:
-  1. STAGE     legacy export -> SQL table stg.providers (raw, all text)
-  2. TRANSFORM validate each row (Reject / Fix / Flag) and build FHIR Practitioners
-  3. LOAD      transaction bundles of 50 with conditional UPDATE: creates a practitioner
+It follows the same pattern as Phase 1, in five stages:
+  1. STAGE     legacy export -> SQL table stg.providers (raw, all text, never edited)
+  2. CURATE    cur.providers = stg.providers + staff corrections from
+               remediation/corrections.csv (runs src\\apply_corrections.py)
+  3. TRANSFORM validate each cur.providers row (Reject / Fix / Flag) and build FHIR Practitioners
+  4. LOAD      transaction bundles of 50 with conditional UPDATE: creates a practitioner
                the first time, updates it on later runs (safe to re-run)
-  4. EXTRACT   read every Practitioner back by project tag (following pagination)
+  5. EXTRACT   read every Practitioner back by project tag (following pagination)
 
 Then open sql/20_practitioner_reconciliation.sql in SSMS and press F5.
 
-Phase 1 tables and files are NOT touched. This script only writes:
-  stg.providers, etl.practitioner_issue_log, etl.practitioner_expected,
-  etl.practitioner_crosswalk, etl.practitioner_load_log, tgt.practitioners
-  and files in output/phase2_practitioner/
+This script writes:
+  stg.providers, cur.providers, etl.corrections, etl.practitioner_issue_log,
+  etl.practitioner_expected, etl.practitioner_crosswalk, etl.practitioner_load_log,
+  tgt.practitioners and files in output/phase2_practitioner/
+  (apply_corrections.py also rebuilds the Phase 1 cur.* tables from the same
+   inputs, so their contents do not change.)
+
+Remediation (rejected or flagged providers):
+  python src\\export_worklist.py  -> provider rows appear on remediation/worklist.csv
+  add the filled-in provider rows to remediation/corrections.csv, then run this script again
 
 Run from the project folder:
   python src\\phase2_practitioner.py --limit 1   <- send ONE bundle first (a test)
@@ -40,6 +48,8 @@ from pathlib import Path
 import pandas as pd
 import pyodbc
 import requests
+
+import apply_corrections          # same folder (src/): builds the curated layer
 
 # ---------------------------------------------------------------------------
 # Settings (same as Phase 1)
@@ -161,11 +171,28 @@ def stage():
     print(f"   CSV rows: {len(df)}   stg.providers rows: {sql_rows}   "
           f"{'PASS' if sql_rows == len(df) else 'FAIL'}")
     print(f"   Columns found: {', '.join(columns)}")
+
+
+# ---------------------------------------------------------------------------
+# 2. CURATE
+# ---------------------------------------------------------------------------
+def curate():
+    """Build cur.providers (stg + approved staff corrections) and return its rows."""
+    print("\n2. CURATE   staff corrections from remediation/corrections.csv")
+    if not apply_corrections.main(show_next=False):
+        raise SystemExit("Stopped: fix remediation/corrections.csv, then run this script again.")
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM cur.providers ORDER BY source_row;")
+    cols = [c[0] for c in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    conn.close()
+    print(f"   cur.providers rows: {len(rows)}")
     return rows
 
 
 # ---------------------------------------------------------------------------
-# 2. TRANSFORM
+# 3. TRANSFORM
 # ---------------------------------------------------------------------------
 def split_name(full):
     """'Dr. Ross213 Mayer370' -> (['Dr.'], ['Ross213'], 'Mayer370').
@@ -294,7 +321,7 @@ def transform(rows, roster):
 
     rejected = sum(1 for i in issues if i["action"] == "Reject")
     ok = len(rows) == len(accepted) + rejected + duplicates
-    print("\n2. TRANSFORM")
+    print("\n3. TRANSFORM")
     print(f"   Source rows {len(rows)} = transformed {len(accepted)} + rejected {rejected} "
           f"+ duplicates {duplicates}   {'PASS' if ok else 'FAIL'}")
     print(f"   Issue log: {len(issues)} entries")
@@ -307,25 +334,43 @@ def transform(rows, roster):
     return accepted
 
 
+def staff_corrections():
+    """{provider Id: 'Correct' or 'Archive'} for providers staff have already worked."""
+    conn = connect()
+    rows = conn.cursor().execute(
+        "SELECT record_key, disposition FROM etl.corrections WHERE table_name = 'providers';").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
 def check_answer_key(issues):
-    """Did the rules catch every planted defect, with the expected action?"""
+    """Did the rules catch every planted defect, with the expected action?
+    A defect that staff have since corrected no longer appears in the issue log,
+    so it is reported as caught on an earlier run and then corrected (or archived)."""
     if not ANSWER_KEY.exists():
         return
     with ANSWER_KEY.open(encoding="utf-8") as f:
         planted = list(csv.DictReader(f))
+    worked = staff_corrections()
+    done = {"Correct": "corrected", "Archive": "archived"}
     caught = 0
     print("   Planted-defect check:")
     for p in planted:
         hit = any(i["record_key"] == p["record_id"] and i["rule_id"] == p["expected_rule"]
                   and i["action"] == p["expected_action"] for i in issues)
-        caught += hit
-        print(f"     {p['error_type']:<22} expected {p['expected_rule']} {p['expected_action']:<7} "
-              f"{'CAUGHT' if hit else 'MISSED'}")
+        if hit:
+            result = "CAUGHT"
+        elif p["record_id"] in worked:
+            result = f"CAUGHT earlier, {done.get(worked[p['record_id']], 'worked')} by staff"
+        else:
+            result = "MISSED"
+        caught += result != "MISSED"
+        print(f"     {p['error_type']:<22} expected {p['expected_rule']} {p['expected_action']:<7} {result}")
     print(f"   Result: {caught} of {len(planted)} planted defects caught")
 
 
 # ---------------------------------------------------------------------------
-# 3. LOAD
+# 4. LOAD
 # ---------------------------------------------------------------------------
 def post_bundle(bundle):
     attempts, last_error = 0, ""
@@ -351,7 +396,7 @@ def load(accepted, limit=None):
     chunks = [accepted[i:i + BUNDLE_SIZE] for i in range(0, len(accepted), BUNDLE_SIZE)]
     if limit:
         chunks = chunks[:limit]
-    print(f"\n3. LOAD   {len(chunks)} bundle(s) to {FHIR_SERVER}")
+    print(f"\n4. LOAD   {len(chunks)} bundle(s) to {FHIR_SERVER}")
 
     crosswalk, load_log = [], []
     sent = 0
@@ -406,7 +451,7 @@ def load(accepted, limit=None):
 
 
 # ---------------------------------------------------------------------------
-# 4. EXTRACT
+# 5. EXTRACT
 # ---------------------------------------------------------------------------
 def get_json(url, params=None):
     last = ""
@@ -453,7 +498,7 @@ def flatten(r):
 
 
 def extract(crosswalk):
-    print("\n4. EXTRACT")
+    print("\n5. EXTRACT")
     resources, page = [], 1
     bundle = get_json(f"{FHIR_SERVER}/Practitioner", params={"_tag": TAG_SEARCH, "_count": PAGE_SIZE})
     while True:
@@ -490,11 +535,13 @@ def main():
     parser.add_argument("--limit", type=int, help="only send the first N bundles (try 1 first)")
     args = parser.parse_args()
 
-    rows = stage()
+    stage()
+    rows = curate()
     accepted = transform(rows, read_roster())
     crosswalk = load(accepted, args.limit)
     extract(crosswalk)
-    print("\nNext: open sql\\20_practitioner_reconciliation.sql in SSMS and press F5.")
+    print("\nNext: open sql\\20_practitioner_reconciliation.sql in SSMS and press F5,")
+    print("      then run  python src\\export_worklist.py  to see the remediation status.")
 
 
 if __name__ == "__main__":
