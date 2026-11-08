@@ -1,0 +1,6 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+00000000-0000-0000-0000-000000000000_2026-07-04T10:41:25Z,orphan_policy,PATIENT,2778ce03-280e-9b54-4999-2af75968ad73,00000000-0000-0000-0000-000000000000,R-CV01,Reject
+98cf5a0c-d567-51a1-9cb5-a91e6d011996_2025-12-21T22:28:05Z,unknown_payer,PAYER,26aab0cd-6aba-3e1b-ac5b-05c8867e762c,a02f66dc-67f5-2dcf-cae5-4cda528e270b,R-CV02,Reject
+171a2edf-e42a-364e-6b06-0c17b5af82b5_2026-03-09T01:57:56Z,end_before_start,END_DATE,2027-03-06T01:57:56Z,2026-03-08T01:57:56Z,R-CV03,Reject
+0063a1b3-dc21-c74c-d6db-c16490273548_2026-02-20T04:14:17Z,blank_member_id,MEMBERID,0063a1b3-dc21-c74c-cd26-3e3400de2ab8,,R-CV05,Flag
+f1c177e7-2945-c20d-0d7f-673ce7ef53d0_2026-07-14T01:00:50Z,overlapping_policy,(whole row),,"second current row, 30 days earlier",R-CV04,Fix
