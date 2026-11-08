@@ -1,0 +1,10 @@
+payer_name,sopt_code,sopt_display
+Medicare,1,MEDICARE
+Medicaid,2,MEDICAID
+Dual Eligible,14,Dual Eligibility Medicare/Medicaid Organization
+Humana,5,PRIVATE HEALTH INSURANCE
+Blue Cross Blue Shield,5,PRIVATE HEALTH INSURANCE
+UnitedHealthcare,5,PRIVATE HEALTH INSURANCE
+Aetna,5,PRIVATE HEALTH INSURANCE
+Cigna Health,5,PRIVATE HEALTH INSURANCE
+Anthem,5,PRIVATE HEALTH INSURANCE

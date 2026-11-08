@@ -11,7 +11,8 @@ How it works
 
 Tables covered
   Phase 1: patients, encounters, conditions
-  Phase 2: providers  (only once src\\phase2_practitioner.py has created stg.providers)
+  Phase 2: providers, payers, payer_transitions  (each only once its Phase 2 script
+           has created the stg table)
 
 Corrections come from remediation/corrections.csv, one row per fix:
   table_name, source_row, record_key, rule_id, field, corrected_value,
@@ -40,7 +41,7 @@ DATABASE = "FhirMigration"
 CORRECTIONS_CSV = Path("remediation/corrections.csv")
 
 PHASE1_TABLES = ("patients", "encounters", "conditions")
-PHASE2_TABLES = ("providers",)          # included only when the stg table exists
+PHASE2_TABLES = ("providers", "payers", "payer_transitions")   # included only when the stg table exists
 
 CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "corrected_value",
               "disposition", "reason", "corrected_by", "corrected_date"]
@@ -117,7 +118,11 @@ def condition_key(row):
 
 def record_key(table, row):
     """The business key staff see on the worklist: Id for most tables."""
-    return condition_key(row) if table == "conditions" else row.get("Id")
+    if table == "conditions":
+        return condition_key(row)
+    if table == "payer_transitions":                 # no Id column: patient + policy start
+        return f"{row.get('PATIENT')}_{row.get('START_DATE')}"
+    return row.get("Id")
 
 
 def available_tables(cur):
@@ -156,7 +161,7 @@ def main(show_next=True):
             errors.append(f"{where}: source_row '{c.get('source_row')}' is not a number")
             continue
         if table not in tables:
-            hint = " (run src\\phase2_practitioner.py first)" if table in PHASE2_TABLES else ""
+            hint = " (run its Phase 2 script first)" if table in PHASE2_TABLES else ""
             errors.append(f"{where}: table_name '{table}' must be one of: {', '.join(tables)}{hint}")
             continue
         row = staging[table].get(src)
