@@ -2,9 +2,11 @@
 
 An end-to-end healthcare data migration project: extract records from a simulated legacy EHR, validate and clean them, convert them to **HL7 FHIR R4**, load them to a FHIR server over a **REST API**, read everything back, **prove with reconciliation that nothing was lost or changed**, and then **work every rejected record to a documented outcome**.
 
-**Result:** 5,329 source rows, 100% accounted for · **5,327 migrated** (the other two: 1 duplicate removed, 1 record archived with a documented reason) · **44,765 of 44,765 field values matched** · 9 of 9 planted data defects caught, then corrected or archived.
+**Result, Phase 1:** 5,329 source rows, 100% accounted for · **5,327 migrated** (the other two: 1 duplicate removed, 1 record archived with a documented reason) · **44,765 of 44,765 field values matched** · 9 of 9 planted data defects caught, then corrected or archived.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete, and **Phase 2** has started with Practitioner. Later phases are planned below in [Scope and phases](#scope-and-phases).
+**Result, Phase 2 (Practitioner):** 185 legacy provider rows, 100% accounted for · **184 migrated** (1 duplicate removed) · **2,208 of 2,208 field values matched** · 7 of 7 planted defects caught · **0 visits waiting** for a provider.
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has started: Practitioner is complete, and the clinic structure (Organization, Location, PractitionerRole) is next. Later phases are planned below in [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -77,10 +79,11 @@ flowchart LR
 | 10 | `src/extract_fhir.py` | Reads every resource back by project tag, following pagination links |
 | 11 | `sql/10_reconciliation.sql` | Row-level and field-level reconciliation views and reports |
 | 12 | `sql/11_dashboard_views.sql`, `powerbi/` | Dashboard views and the Power BI reconciliation report |
-| 13 | `src/export_worklist.py`, `sql/12_remediation.sql` | Remediation worklist for staff and the log of every correction's outcome |
+| 13 | `src/export_worklist.py`, `sql/12_remediation.sql` | One remediation worklist for staff (Phase 1 and Phase 2) and the log of every correction's outcome |
 | 14 | `src/plant_provider_errors.py` | Phase 2: plants 7 provider defects (misspelt and wrong names, invalid gender and NPI, duplicate) |
-| 15 | `src/phase2_practitioner.py` | Phase 2: stages, validates against the credentialing roster, loads (conditional update) and reads back Practitioners |
+| 15 | `src/phase2_practitioner.py` | Phase 2: stages, applies staff corrections (curated layer), validates against the credentialing roster, loads (conditional update) and reads back Practitioners |
 | 16 | `sql/20_practitioner_reconciliation.sql` | Phase 2: row, field and visit-coverage reconciliation |
+
 ---
 
 ## Results
@@ -132,27 +135,36 @@ The worklist ranks problems by how many records each one blocks, so the **5 root
 
 ### Phase 2, step 1: Practitioner (providers)
 
-Provider names were checked against a credentialing roster, the trusted source for names. Seven realistic defects were planted in the legacy provider export.
+Provider names were checked against a credentialing roster, the trusted source for provider data. Seven realistic defects were planted in the legacy provider export. Practitioner then went through the same remediation workflow as Phase 1, using the same worklist, the same `corrections.csv` and the same audit trail.
 
-| Check | Result |
-|---|---|
-| Row reconciliation | 185 legacy rows = 183 migrated + 1 rejected + 1 duplicate removed: **PASS** |
-| Planted defects | **7 of 7 caught** |
-| Field reconciliation | **2,196 of 2,196** values matched (12 fields, including NPI) |
-| Names vs. credentialing roster | 3 misspellings corrected automatically (similarity 0.95–0.98); 1 name that did not match at all (similarity 0.14) rejected for Credentialing review |
-| NPI | Stored as the official identifier (`http://hl7.org/fhir/sid/us-npi`); 1 invalid NPI (9 digits) flagged and omitted |
-| Visit coverage | 150 providers are used by migrated visits; 2 visits wait for the rejected provider's review |
+| Check | First pass | After remediation |
+|---|---|---|
+| Row reconciliation | 185 = 183 migrated + 1 rejected + 1 duplicate removed: **PASS** | 185 = **184 migrated + 0 rejected** + 1 duplicate removed: **PASS** |
+| Planted defects | **7 of 7 caught** | **7 of 7 caught** (3 fixed automatically, 3 corrected by staff, 1 duplicate removed) |
+| Field reconciliation | 2,196 of 2,196 values matched | **2,208 of 2,208** values matched (12 fields, including NPI) |
+| Visit coverage | 2 visits waiting for the rejected provider | **0 visits waiting**: every provider used by a migrated visit is on the server |
+
+**Two kinds of fixes.** Small, high-confidence errors are fixed automatically; uncertain ones go to a person:
+
+| Problem | How it was found | Who fixed it | Outcome |
+|---|---|---|---|
+| 3 misspelt names (letters swapped, missing, doubled) | Similarity to the roster name 0.95–0.98, above the 0.85 threshold | Pipeline, automatically (logged as R-PR02 Fix) | Roster spelling used, migrated |
+| 1 name belonging to a different provider | Similarity 0.14: possibly the wrong person, so the pipeline refused to guess | Credentialing (staff correction) | Name confirmed, migrated; its 2 visits now link to it |
+| 1 invalid gender code (`X`) | Not M or F | Credentialing (staff correction) | Corrected from the credentialing file, migrated |
+| 1 invalid NPI (9 digits) | Not 10 digits | Credentialing (staff correction) | Corrected from the credentialing file, migrated |
+| 1 duplicate row | Same provider ID twice | Pipeline, automatically (R-PR04 Fix) | First copy kept |
+
+The NPI is stored as the provider's official identifier (`http://hl7.org/fhir/sid/us-npi`). Loads use **conditional update**: the re-run after remediation created exactly 1 practitioner (the released one) and updated the other 183 in place, with no duplicates.
 
 ---
 ## Scope and phases
 
-Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further.
-**Phase 2** has started, beginning with Practitioner.
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner is complete and remediated.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
-| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 183 migrated, 2 explained; 2,196 of 2,196 values matched)|
+| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure next |
 | **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need synthetic data or the source EHR's scheduling, referral, authorization, document, lab and nursing data | Planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
@@ -161,7 +173,7 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 **Why Phase 3 adds appointments, referrals and authorizations:** these are the "open work" a clinic must carry across on go-live day: future appointments, referrals still in progress, and prior authorizations already approved or pending. A missing prior authorization is a leading cause of claim denials, so authorizations must not be lost in the switch.
 
-**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create, read it back and reconcile it. Practitioner and the clinic structure come next, because each encounter's `PROVIDER` field already points to a provider.
+**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure comes next, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider.
 
 ### Billing and balances
 
@@ -172,7 +184,7 @@ Planned for this project:
 - **A/R runout report:** legacy open balances by payer and by age (0–30, 31–60, 61–90, 90+ days), tracked until they reach zero.
 - **Optional billing history:** load Synthea's `claims.csv` and `claims_transactions.csv` as read-only **ExplanationOfBenefit** resources, so past billing is visible. This is history, not open balances.
 - **Closed claims only:** if billing history is loaded, only claims that are **closed** in the legacy system move: paid, adjusted to a zero balance, or final-denied and written off (for example, after the timely filing limit). A claim that is still open, such as one denied for a credentialing issue while the appeal or rebilling window is still open, stays in the legacy system until it closes. A reconciliation check confirms that no open balance was migrated.
-- **A migration reject is not a payer denial:** a record rejected by this pipeline (for example, the provider whose name did not match the credentialing roster) has a **data** problem that is fixed or archived. It does not change whether any claim is paid.
+- **A migration reject is not a payer denial:** a record rejected by this pipeline (for example, a provider whose name does not match the credentialing roster) has a **data** problem that is fixed or archived. It does not change whether any claim is paid.
 
 ### Next: converting into a system that already has data
 
@@ -181,7 +193,7 @@ Phase 1 loads into an **empty** FHIR server. Many real conversions are different
 | Step | What changes | Why it matters |
 |---|---|---|
 | **1. Patient matching** | Pre-load "existing" patients on the server, some of them the same people as legacy patients with realistic differences (nickname, typo, new address). Before loading, match each legacy patient on name, birth date, sex, address and phone: **confident match** → link to the existing record; **possible match** → send to an HIM review worklist; **no match** → create a new patient. | Linking to the existing record prevents duplicate charts. Sending uncertain matches to a person prevents **overlays** (two different people merged into one chart). |
-| **2. Provider matching by NPI** | Add Practitioner with a crosswalk from legacy provider ID to NPI to the target provider record, linking to providers who already exist. Synthetic NPIs will be used if Synthea does not provide them. | Every encounter and appointment points to a provider. A missing or wrong provider breaks scheduling and billing. |
+| **2. Provider matching by NPI** | Pre-load "existing" providers on the server, then match each legacy provider by NPI (already migrated as the official identifier) and link to the existing record instead of creating a new one, using a crosswalk from legacy provider ID to NPI to target provider. | Every encounter and appointment points to a provider. A missing or wrong provider breaks scheduling and billing. |
 | **3. Appointment conversion** | Add synthetic future appointments (FHIR Appointment) with a **visit-type mapping table** (legacy type → new type) and a report comparing appointment counts per provider per day, old vs. new. | Schedulers need to check converted schedules before go-live. A count report shows them exactly where to look. |
 | **4. Mock conversion tracking** | Add a `run_id` to the load and issue logs, and a view comparing runs (for example, Mock 1: 9 issues → Mock 2: 4 → Mock 3: 0). | Real conversions are rehearsed several times. Tracking each run shows the data getting cleaner before go-live. |
 | **5. Conversion cut-off rule** | Convert active and recent data (for example, the last 3 years), and report older history as **kept in the legacy system**, not missing. | When the old systems stay available for historical data, not everything needs to move. The reconciliation must still account for every row. |
@@ -219,7 +231,7 @@ python src\first_call.py
 java -jar synthea-with-dependencies.jar -s 12345 -p 50 --exporter.csv.export true "North Carolina"
 ```
 
-Copy `patients.csv`, `encounters.csv` and `conditions.csv` from Synthea's `output\csv` folder into `data\legacy\`.
+Copy `patients.csv`, `encounters.csv`, `conditions.csv` and `providers.csv` from Synthea's `output\csv` folder into `data\legacy\`. The clean `providers.csv` also serves as the credentialing roster in Phase 2.
 
 ### 4–10. Run the pipeline
 
@@ -246,9 +258,21 @@ Each script prints its own reconciliation check and a PASS / FAIL result.
 python src\export_worklist.py     # writes remediation\worklist.csv, highest impact first
 ```
 
-1. Fill in the last five columns of the worklist (`corrected_value`, `disposition` = Correct or Archive, `reason`, `corrected_by`, `corrected_date`) and save it as `remediation\corrections.csv`.
-2. Re-run `apply_corrections.py`, `transform.py`, `load_fhir.py` and `extract_fhir.py`, then the SQL files in step 11.
+1. Copy the **Open** rows of the worklist into `remediation\corrections.csv`, **below any rows already there**, and fill in the last five columns (`corrected_value`, `disposition` = Correct or Archive, `reason`, `corrected_by`, `corrected_date`). Take every value from the source of truth (registration record, clinical record or credentialing file). Never replace the file with the worklist: earlier decisions live in it.
+2. Re-run `apply_corrections.py`, `transform.py`, `load_fhir.py` and `extract_fhir.py`, then the SQL files in step 11. For providers, re-run `phase2_practitioner.py` (it applies the corrections itself).
 3. Run `export_worklist.py` again: each correction shows **Resolved - migrated** or **Archived - not migrated**.
+
+> Close `worklist.csv` and `corrections.csv` in Excel before running the scripts: Windows locks a file that Excel has open.
+
+### 14–16. Phase 2: Practitioner
+
+```powershell
+python src\plant_provider_errors.py               # plant 7 provider defects + answer key
+python src\phase2_practitioner.py --limit 1       # test with one bundle first
+python src\phase2_practitioner.py                 # stage, curate, validate, load, read back
+```
+
+Then open `sql\20_practitioner_reconciliation.sql` in SSMS and press **F5**, and run `export_worklist.py` to see provider problems on the shared worklist.
 
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
 
@@ -259,12 +283,13 @@ python src\export_worklist.py     # writes remediation\worklist.csv, highest imp
 ```
 fhir-migration-project/
 ├── data/
-│   ├── legacy/              Synthea export (clean)
-│   └── legacy_dirty/        Same data with 9 planted defects
+│   ├── legacy/              Synthea export (clean); providers.csv is also the credentialing roster
+│   └── legacy_dirty/        Same data with planted defects (9 in Phase 1, 7 in providers.csv)
 ├── docs/
 │   ├── dashboard.png
 │   ├── dashboard_before_remediation.png
 │   ├── planted_errors_answer_key.csv
+│   ├── planted_provider_errors_answer_key.csv
 │   └── source_to_target_mapping.xlsx
 ├── powerbi/
 │   ├── fhir_migration_reconciliation.pbix
@@ -275,7 +300,9 @@ fhir-migration-project/
 ├── sql/
 │   ├── 10_reconciliation.sql
 │   ├── 11_dashboard_views.sql
-│   └── 12_remediation.sql
+│   ├── 12_remediation.sql
+│   ├── 20_practitioner_reconciliation.sql
+│   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
 │   ├── plant_errors.py
@@ -284,7 +311,9 @@ fhir-migration-project/
 │   ├── transform.py
 │   ├── load_fhir.py
 │   ├── extract_fhir.py
-│   └── export_worklist.py
+│   ├── export_worklist.py
+│   ├── plant_provider_errors.py
+│   └── phase2_practitioner.py
 ├── requirements.txt
 └── README.md
 ```
@@ -300,7 +329,10 @@ fhir-migration-project/
 - **Never edit the source.** Corrections are applied to a separate curated layer, so the raw legacy data stays intact and every change can be traced back to its original value.
 - **Fix root causes, ranked by impact.** The worklist shows each direct reject once, with the number of cascade records it blocks, so staff fix the 5 problems that matter instead of 201 symptoms.
 - **Every reject gets a disposition.** A record is either corrected and migrated, or archived with a reason. Nothing is silently left behind.
-- **Idempotent loads.** Conditional create lets the load be rerun safely after a failure or after corrections.
+- **Automatic fix or human review, decided by confidence.** A provider name within 0.85 similarity of the credentialing roster is treated as a typo and fixed automatically; anything less alike could be a different person, so it is rejected and routed to Credentialing rather than guessed.
+- **One worklist, one audit trail.** Provider problems join the same worklist and `etl.corrections` log as Phase 1, so staff work from a single list for the whole migration.
+- **Idempotent loads.** Conditional create (Phase 1) and conditional update (Practitioner) let the load be rerun safely after a failure or after corrections, without duplicates.
+- **One clinic.** Synthea assigns each provider to their own organization (184 providers, 184 organizations, at most 1 provider per organization, verified in SQL). These values are simulator artifacts, so all providers are mapped to a single clinic Organization and Location. Legacy organization IDs are kept in `stg`/`cur` for audit only.
 - **Exact comparison.** Field reconciliation uses a binary collation and a NULL-safe comparison, and compares against the corrected values, so differences in case, whitespace or unapproved changes are not hidden.
 - **Data minimization (HIPAA).** SSN, driver's license and passport numbers are dropped at ingestion because the target does not need them.
 - **Auditability.** Every run records when the pipeline ran and when the report was refreshed, so each PASS is tied to a specific run.
@@ -314,9 +346,10 @@ fhir-migration-project/
 | ETL pipeline design (Python, SQL Server) | `src/`, staging, curated and target schemas |
 | REST API integration, FHIR R4 | `load_fhir.py`, `extract_fhir.py` |
 | Source-to-target mapping, legacy data conversion | `docs/source_to_target_mapping.xlsx` |
-| Data-quality rules, exception reporting | `transform.py`, `etl.issue_log` |
+| Data-quality rules, exception reporting | `transform.py`, `phase2_practitioner.py`, `etl.issue_log` |
+| Validation against a reference source (fuzzy name matching) | `phase2_practitioner.py` (credentialing roster, similarity threshold) |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 
