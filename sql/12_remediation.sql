@@ -1,7 +1,8 @@
 /* =============================================================================
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
-   Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers).
+   Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers,
+   payer_transitions).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -62,6 +63,37 @@ CREATE TABLE cur.providers (
     Id NVARCHAR(500) NULL, NAME NVARCHAR(500) NULL, GENDER NVARCHAR(500) NULL,
     NPI NVARCHAR(500) NULL, source_row INT NULL
 );
+GO
+-- Coverage tables are created by src/phase2_coverage.py (same placeholder idea)
+IF OBJECT_ID('etl.coverage_issue_log') IS NULL
+CREATE TABLE etl.coverage_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.coverage_sources') IS NULL
+CREATE TABLE etl.coverage_sources (
+    coverage_key NVARCHAR(500) NULL, record_key NVARCHAR(500) NULL, legacy_patient NVARCHAR(500) NULL,
+    legacy_payer NVARCHAR(500) NULL, coverage_order NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.coverage_crosswalk') IS NULL
+CREATE TABLE etl.coverage_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.payer_transitions') IS NULL
+CREATE TABLE cur.payer_transitions (
+    PATIENT NVARCHAR(500) NULL, MEMBERID NVARCHAR(500) NULL, START_DATE NVARCHAR(500) NULL,
+    END_DATE NVARCHAR(500) NULL, PAYER NVARCHAR(500) NULL, SECONDARY_PAYER NVARCHAR(500) NULL,
+    PLAN_OWNERSHIP NVARCHAR(500) NULL, source_row INT NULL
+);
+GO
+IF OBJECT_ID('cur.payers') IS NULL
+CREATE TABLE cur.payers (Id NVARCHAR(500) NULL, NAME NVARCHAR(500) NULL, source_row INT NULL);
 GO
 
 /* -----------------------------------------------------------------------------
@@ -181,6 +213,47 @@ provider_detail AS (
     LEFT JOIN provider_visits  AS pv ON pv.provider_id = i.record_key
     WHERE i.action = 'Reject' OR i.rule_id IN ('R-PR03', 'R-PR06')
 ),
+-- ---------- Phase 2: insurance (payer_transitions) ----------
+-- Rejects, plus the flags that need Patient Access to supply data.
+-- (R-CV04 overlaps are fixed automatically; R-CV08 is a mapping-table fix.)
+coverage_detail AS (
+    SELECT CAST(N'payer_transitions' AS NVARCHAR(50))                   AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-CV01' THEN 'PATIENT'  WHEN 'R-CV02' THEN 'PAYER'
+                          WHEN 'R-CV03' THEN 'END_DATE' WHEN 'R-CV05' THEN 'MEMBERID'
+                          WHEN 'R-CV06' THEN 'PLAN_OWNERSHIP'
+                          WHEN 'R-CV07' THEN 'SECONDARY_PAYER' END      AS field,
+           pt.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(N'Policy ', LEFT(pt.START_DATE, 10), N' to ', ISNULL(LEFT(pt.END_DATE, 10), N'(open)'),
+                  N' | payer on file: ', ISNULL(py.NAME, ISNULL(pt.PAYER, N'(blank)')),
+                  N' | member ID on file: ', ISNULL(pt.MEMBERID, N'(blank)'))  AS context,
+           CASE i.rule_id WHEN 'R-CV01' THEN pt.PATIENT  WHEN 'R-CV02' THEN pt.PAYER
+                          WHEN 'R-CV03' THEN pt.END_DATE WHEN 'R-CV05' THEN pt.MEMBERID
+                          WHEN 'R-CV06' THEN pt.PLAN_OWNERSHIP
+                          WHEN 'R-CV07' THEN pt.SECONDARY_PAYER END     AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-CV01' THEN N'Patient Access / Registration'
+                          ELSE N'Patient Access / Insurance Verification' END AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-CV01' THEN 'Identify the patient this policy belongs to, or archive if it cannot be identified'
+               WHEN 'R-CV02' THEN 'Confirm the payer with an eligibility check and enter its payer Id'
+               WHEN 'R-CV03' THEN 'Confirm the policy end date with an eligibility check'
+               WHEN 'R-CV05' THEN 'Enter the member ID from the insurance card or eligibility response'
+               WHEN 'R-CV06' THEN 'Enter the policy holder relationship (Self, Spouse or Guardian)'
+               WHEN 'R-CV07' THEN 'Confirm the secondary payer and enter its payer Id'
+           END                                                          AS what_is_needed
+    FROM etl.coverage_issue_log AS i
+    LEFT JOIN cur.payer_transitions AS pt ON pt.source_row = TRY_CAST(i.source_row AS INT)
+    LEFT JOIN cur.payers            AS py ON py.Id = pt.PAYER
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = pt.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action = 'Reject' OR i.rule_id IN ('R-CV05', 'R-CV06', 'R-CV07')
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -191,10 +264,15 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM provider_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM coverage_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
-                                                     WHEN 'conditions' THEN 3 ELSE 4 END,
+                                                     WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4 ELSE 5 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -226,21 +304,24 @@ WITH keyed AS (
                WHEN 'encounters' THEN e.Id
                WHEN 'conditions' THEN CONCAT(c.PATIENT, '_', c.ENCOUNTER, '_', c.CODE, '_', c.START)
                WHEN 'providers'  THEN pr.Id
+               WHEN 'payer_transitions' THEN CONCAT(pt.PATIENT, '_', pt.START_DATE)
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
                              WHEN 'providers'  THEN 'Practitioner'
+                             WHEN 'payer_transitions' THEN 'Coverage'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
     LEFT JOIN cur.encounters AS e  ON k.table_name = 'encounters' AND e.source_row  = k.source_row
     LEFT JOIN cur.conditions AS c  ON k.table_name = 'conditions' AND c.source_row  = k.source_row
     LEFT JOIN cur.providers  AS pr ON k.table_name = 'providers'  AND pr.source_row = k.source_row
+    LEFT JOIN cur.payer_transitions AS pt ON k.table_name = 'payer_transitions' AND pt.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -251,14 +332,24 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
+           WHEN EXISTS (SELECT 1 FROM etl.coverage_issue_log AS i
+                        WHERE k.table_name = 'payer_transitions'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
 FROM keyed AS k
 LEFT JOIN etl.fhir_crosswalk AS x
        ON x.resource_type = k.resource_type AND x.legacy_id = k.current_key
 LEFT JOIN etl.practitioner_crosswalk AS xp
-       ON k.resource_type = 'Practitioner' AND xp.legacy_id = k.current_key AND xp.fhir_id IS NOT NULL;
+       ON k.resource_type = 'Practitioner' AND xp.legacy_id = k.current_key AND xp.fhir_id IS NOT NULL
+-- Coverage: legacy row -> its primary Coverage (etl.coverage_sources) -> FHIR id
+LEFT JOIN etl.coverage_sources AS cs
+       ON k.resource_type = 'Coverage' AND cs.record_key = k.current_key AND cs.coverage_order = '1'
+LEFT JOIN etl.coverage_crosswalk AS xc
+       ON xc.resource_type = 'Coverage' AND xc.legacy_id = cs.coverage_key AND xc.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------

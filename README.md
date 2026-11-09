@@ -10,7 +10,9 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result, Phase 2 (visit links):** all **3,563 migrated visits** updated in place to point to their practitioner, the clinic location and the clinic organization · **14,252 of 14,252 link values matched** · every visit linked to the provider in its legacy record · **Phase 1 regression test still 44,765 of 44,765**: nothing else changed.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has completed its clinic-structure group (Practitioner, Organization, Location, PractitionerRole) and linked every visit to it, so each record now connects: patient → visit → provider → role → clinic. Insurance (Coverage) is next. Later phases are planned below in [Scope and phases](#scope-and-phases).
+**Result, Phase 2 (insurance):** 2,308 legacy insurance rows, 100% accounted for (current policies migrated, ended policies kept in legacy) · 9 payer Organizations and **58 Coverages** (44 primary, 14 secondary) · **558 of 558 field values matched** · 5 of 5 planted defects caught, then corrected · every migrated patient has one insurance status: 44 insured, 6 self-pay, 5 deceased.
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has completed its clinic-structure group (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage). Each record now connects: patient → visit → provider → role → clinic, and patient → coverage → payer. The clinical resources (allergies, observations, procedures, medications) are next. Later phases are planned below in [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -91,6 +93,9 @@ flowchart LR
 | 18 | `sql/21_clinic_structure_reconciliation.sql` | Phase 2: role row reconciliation, field comparison, link integrity and specialty-coding coverage |
 | 19 | `src/phase2_encounter_links.py` | Phase 2: updates every migrated Encounter in place (read, modify, write with `ifMatch`) to link it to its Practitioner, Location and Organization |
 | 20 | `sql/22_encounter_link_reconciliation.sql` | Phase 2: link coverage, field comparison, correct-provider check and role consistency; then the Phase 1 reconciliation is re-run as a regression test |
+| 21 | `src/plant_coverage_errors.py` | Phase 2: plants 5 insurance defects (orphan policy, unknown payer, end before start, blank member ID, overlapping policy) |
+| 22 | `src/phase2_coverage.py`, `docs/payer_type_map.csv` | Phase 2: stages and curates the insurance files, loads payer Organizations, gives every legacy row one disposition, loads current Coverage (primary and secondary) with the payer type coded to the Source of Payment Typology |
+| 23 | `sql/23_coverage_reconciliation.sql` | Phase 2: disposition reconciliation, coverage counts, field comparison, patient and payer link checks, and each patient's insurance status |
 
 ---
 
@@ -198,15 +203,52 @@ The provider comes from the legacy encounter's `PROVIDER` column, translated to 
 
 The Practitioner remediation mattered here: without it, the 2 visits of the provider rejected for a wrong name would have had no practitioner to link to.
 
+### Phase 2, step 4: Insurance (payer Organization, Coverage)
+
+**Coverage** is a patient's insurance policy: who pays (the payer), the member ID, the policy dates, the patient's relationship to the policy holder, and whether it is primary or secondary. It is what is verified at check-in and billed on a claim, so errors here become denied claims later.
+
+**Current coverage only.** The legacy file holds every policy each patient ever had (Synthea writes a new row at each yearly renewal). As in most conversions, only the policy **in force on the extract date** is migrated; ended policies stay in the legacy system and are **counted, not lost**. Profiling showed that Synthea creates each yearly policy in advance (end dates are often in the future), so the extract date is the **latest policy start** in the file (2026-10-10). A policy is current if it started at or before that moment and ends **after** it, so at a renewal only the new policy counts.
+
+Every legacy row gets **exactly one disposition**:
+
+| Disposition | Rows |
+|---|---:|
+| Ended: kept in legacy | 2,257 |
+| Current: migrated | 44 |
+| Current: self-pay (`NO_INSURANCE`, so no Coverage is created) | 6 |
+| Superseded (older of two overlapping current rows) | 1 |
+| Rejected | 0 (3 on the first pass, all remediated) |
+| **Total** | **2,308**: **PASS** |
+
+| Check | Result |
+|---|---|
+| Coverage | **44 primary + 14 secondary = 58** Coverages (coordination of benefits); 9 payer Organizations (`NO_INSURANCE` is not a payer and is not migrated) |
+| Field reconciliation | Coverage 522 of 522, payer Organization 36 of 36: **558 of 558** values matched |
+| Link integrity | Every Coverage points to the patient migrated from its legacy `PATIENT` and the payer migrated from its legacy `PAYER`: **58 of 58 OK** |
+| Payer type | Coded to the US **Source of Payment Typology** through `docs/payer_type_map.csv` (Medicare 1, Medicaid 2, dual eligible 14, private 5) |
+| Patient view | All 55 migrated patients have one insurance status: **44 active coverage, 6 self-pay, 5 deceased** |
+
+**Remediation.** The 3 rejects and 1 flag joined the shared worklist, owned by Patient Access:
+
+| Problem | Owner | Outcome |
+|---|---|---|
+| Policy attached to a placeholder patient (it made a real, insured patient look uninsured) | Patient Access / Registration | Patient identified, corrected, migrated |
+| Unknown payer | Patient Access / Insurance Verification | Payer confirmed by eligibility check, corrected, migrated |
+| End date before start date | Patient Access / Insurance Verification | Dates confirmed, corrected, migrated |
+| Blank member ID (a claim would need it) | Patient Access / Insurance Verification | Member ID from the insurance card, corrected |
+| Overlapping current policy | Pipeline, automatically (R-CV04 Fix) | Older row superseded |
+
+The re-run created exactly the 3 released Coverages and updated the other 55 in place. **Not migrated, by design:** `OWNER_NAME` (another person's name; data minimization) and the simulator's payer statistics columns.
+
 ---
 ## Scope and phases
 
-Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure and the visit links are done.
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure, the visit links and insurance (complete and remediated) are done.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
-| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage next |
+| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage done (2,308 rows accounted for; 58 Coverages; 558 of 558 values matched). Clinical resources next |
 | **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need synthetic data or the source EHR's scheduling, referral, authorization, document, lab and nursing data | Planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
@@ -215,7 +257,7 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 **Why Phase 3 adds appointments, referrals and authorizations:** these are the "open work" a clinic must carry across on go-live day: future appointments, referrals still in progress, and prior authorizations already approved or pending. A missing prior authorization is a leading cause of claim denials, so authorizations must not be lost in the switch.
 
-**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. The Phase 1 encounters were then updated in place so each visit points to its practitioner, the clinic location and the clinic organization, and a regression test confirmed Phase 1 was otherwise unchanged. Insurance (**Coverage**) comes next, because pre-registration and clean claims depend on it.
+**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. The Phase 1 encounters were then updated in place so each visit points to its practitioner, the clinic location and the clinic organization, and a regression test confirmed Phase 1 was otherwise unchanged. Insurance (**Coverage**) followed, because pre-registration and clean claims depend on it: each patient's current policy, primary and secondary, with ended policies counted and kept in legacy. The clinical resources (AllergyIntolerance, Observation, Procedure, MedicationRequest) come next; each points to a patient and a visit, both now migrated.
 
 ### Billing and balances
 
@@ -337,6 +379,18 @@ python src\phase2_encounter_links.py              # all encounters, then read ba
 
 Run this step after the clinic structure: each visit points to the clinic's Location and Organization.
 
+### 21–23. Phase 2: Insurance
+
+Copy `payers.csv` and `payer_transitions.csv` from Synthea's `output\csv` folder into `data\legacy\`, then:
+
+```powershell
+python src\plant_coverage_errors.py           # plant 5 insurance defects + answer key
+python src\phase2_coverage.py --limit 1       # payers + one bundle of Coverage (a test)
+python src\phase2_coverage.py                 # everything, then read back
+```
+
+Open `sql\23_coverage_reconciliation.sql` in SSMS and press **F5**, and run `export_worklist.py`: insurance problems appear on the shared worklist and are fixed through `corrections.csv` like any other.
+
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
 
 ---
@@ -347,12 +401,15 @@ Run this step after the clinic structure: each visit points to the clinic's Loca
 fhir-migration-project/
 ├── data/
 │   ├── legacy/              Synthea export (clean); providers.csv is also the credentialing roster
-│   └── legacy_dirty/        Same data with planted defects (9 in Phase 1, 7 in providers.csv)
+│   └── legacy_dirty/        Same data with planted defects (9 in Phase 1, 7 in providers.csv,
+│                            5 in payer_transitions.csv)
 ├── docs/
 │   ├── dashboard.png
 │   ├── dashboard_before_remediation.png
 │   ├── planted_errors_answer_key.csv
 │   ├── planted_provider_errors_answer_key.csv
+│   ├── planted_coverage_errors_answer_key.csv
+│   ├── payer_type_map.csv   Payer name -> Source of Payment Typology code
 │   ├── source_to_target_mapping.xlsx
 │   └── specialty_map.csv    Legacy specialty text -> NUCC provider taxonomy code
 ├── powerbi/
@@ -368,6 +425,7 @@ fhir-migration-project/
 │   ├── 20_practitioner_reconciliation.sql
 │   ├── 21_clinic_structure_reconciliation.sql
 │   ├── 22_encounter_link_reconciliation.sql
+│   ├── 23_coverage_reconciliation.sql
 │   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
@@ -381,7 +439,9 @@ fhir-migration-project/
 │   ├── plant_provider_errors.py
 │   ├── phase2_practitioner.py
 │   ├── phase2_clinic_structure.py
-│   └── phase2_encounter_links.py
+│   ├── phase2_encounter_links.py
+│   ├── plant_coverage_errors.py
+│   └── phase2_coverage.py
 ├── requirements.txt
 └── README.md
 ```
@@ -402,6 +462,8 @@ fhir-migration-project/
 - **Idempotent loads.** Conditional create (Phase 1) and conditional update (Practitioner) let the load be rerun safely after a failure or after corrections, without duplicates.
 - **One clinic.** Synthea assigns each provider to their own organization (184 providers, 184 organizations, at most 1 provider per organization, verified in SQL). These values are simulator artifacts, so all providers are mapped to a single clinic Organization and Location. Legacy organization IDs are kept in `stg`/`cur` for audit only.
 - **Profile before mapping.** Specialty values were profiled in SQL before the code mapping was finalized (all 184 providers are `GENERAL PRACTICE`). The mapping lives in a reviewable table (`docs/specialty_map.csv`), not in code, and any value missing from it is loaded as text and flagged rather than dropped.
+- **Every row gets one disposition.** Under the current-coverage-only rule, most legacy insurance rows are not migrated, so each one is given exactly one outcome (ended, current migrated, self-pay, superseded or rejected) and the totals must add up to the source rows. "Not migrated" never means "unexplained".
+- **Profiling overturned an assumption.** The first definition of "current coverage" used the latest end date and found only 1 insured patient. Profiling showed Synthea renews policies a year in advance, so the extract date was redefined as the latest policy start, with a half-open date range so a renewal is not mistaken for an overlap.
 - **Update in place, never reload.** Records already migrated and proven are changed with read, modify, write and `ifMatch` (optimistic locking), touching only the new fields.
 - **Regression testing.** After any change to migrated records, the earlier reconciliation is re-run; Phase 1 still matched 44,765 of 44,765 after the visit links were added.
 - **Prove links, not just counts.** The clinic-structure reconciliation checks that each role points to the practitioner migrated from the *same* legacy provider, so a role attached to the wrong person would fail even if every count matched.
@@ -420,11 +482,12 @@ fhir-migration-project/
 | Source-to-target mapping, legacy data conversion | `docs/source_to_target_mapping.xlsx` |
 | Data-quality rules, exception reporting | `transform.py`, `phase2_practitioner.py`, `etl.issue_log` |
 | Validation against a reference source (fuzzy name matching) | `phase2_practitioner.py` (credentialing roster, similarity threshold) |
-| Code mapping to a national terminology (NUCC provider taxonomy) | `phase2_clinic_structure.py`, `docs/specialty_map.csv` |
+| Code mapping to national terminologies (NUCC provider taxonomy, Source of Payment Typology) | `docs/specialty_map.csv`, `docs/payer_type_map.csv` |
+| Insurance data conversion (primary/secondary coverage, conversion cut-off, eligibility-based remediation) | `phase2_coverage.py`, `sql/23_coverage_reconciliation.sql` |
 | Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` (visit → practitioner → role → clinic) |
 | Safe updates to live records (optimistic locking), regression testing | `phase2_encounter_links.py` (`ifMatch`), Phase 1 reconciliation re-run |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 

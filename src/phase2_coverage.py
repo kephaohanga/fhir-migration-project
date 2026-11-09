@@ -334,19 +334,34 @@ def transform(rows, payers, patient_xwalk, payer_refs, type_map, expected):
     return coverages, issues, dispositions, sources
 
 
+def staff_corrections():
+    """{legacy record key: 'Correct' or 'Archive'} for insurance rows staff have worked."""
+    return {r["record_key"]: r["disposition"] for r in read_table(
+        "SELECT record_key, disposition FROM etl.corrections WHERE table_name = 'payer_transitions';")}
+
+
 def check_answer_key(issues):
+    """A defect staff have since corrected no longer appears in the issue log, so it is
+    reported as caught on an earlier run and then corrected (or archived)."""
     if not ANSWER_KEY.exists():
         return
     with ANSWER_KEY.open(encoding="utf-8") as f:
         planted = list(csv.DictReader(f))
+    worked = staff_corrections()
+    done = {"Correct": "corrected", "Archive": "archived"}
     caught = 0
     print("   Planted-defect check:")
     for p in planted:
         hit = any(i["record_key"] == p["record_id"] and i["rule_id"] == p["expected_rule"]
                   and i["action"] == p["expected_action"] for i in issues)
-        caught += hit
-        print(f"     {p['error_type']:<20} expected {p['expected_rule']} {p['expected_action']:<7} "
-              f"{'CAUGHT' if hit else 'MISSED'}")
+        if hit:
+            result = "CAUGHT"
+        elif p["record_id"] in worked:
+            result = f"CAUGHT earlier, {done.get(worked[p['record_id']], 'worked')} by staff"
+        else:
+            result = "MISSED"
+        caught += result != "MISSED"
+        print(f"     {p['error_type']:<20} expected {p['expected_rule']} {p['expected_action']:<7} {result}")
     print(f"   Result: {caught} of {len(planted)} planted defects caught")
 
 
