@@ -2,7 +2,7 @@
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
    Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers,
-   payer_transitions).
+   payer_transitions, procedures).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -94,6 +94,33 @@ CREATE TABLE cur.payer_transitions (
 GO
 IF OBJECT_ID('cur.payers') IS NULL
 CREATE TABLE cur.payers (Id NVARCHAR(500) NULL, NAME NVARCHAR(500) NULL, source_row INT NULL);
+GO
+-- Procedure tables are created by src/phase2_procedure.py
+IF OBJECT_ID('etl.procedure_issue_log') IS NULL
+CREATE TABLE etl.procedure_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.procedure_sources') IS NULL
+CREATE TABLE etl.procedure_sources (
+    procedure_key NVARCHAR(500) NULL, record_key NVARCHAR(500) NULL, legacy_patient NVARCHAR(500) NULL,
+    legacy_encounter NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.procedure_crosswalk') IS NULL
+CREATE TABLE etl.procedure_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.procedures') IS NULL
+CREATE TABLE cur.procedures (
+    START NVARCHAR(500) NULL, STOP NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL,
+    ENCOUNTER NVARCHAR(500) NULL, SYSTEM NVARCHAR(500) NULL, CODE NVARCHAR(500) NULL,
+    DESCRIPTION NVARCHAR(500) NULL, source_row INT NULL
+);
 GO
 
 /* -----------------------------------------------------------------------------
@@ -254,6 +281,42 @@ coverage_detail AS (
                  FROM cur.patients AS p WHERE p.Id = pt.PATIENT ORDER BY p.source_row) AS pn
     WHERE i.action = 'Reject' OR i.rule_id IN ('R-CV05', 'R-CV06', 'R-CV07')
 ),
+-- ---------- Phase 2: procedures ----------
+-- Direct rejects only. A cascade reject (the visit was archived) follows its
+-- visit's decision and needs no separate action.
+procedure_detail AS (
+    SELECT CAST(N'procedures' AS NVARCHAR(50))                          AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-PC01' THEN 'ENCOUNTER' WHEN 'R-PC02' THEN 'PATIENT'
+                          WHEN 'R-PC03' THEN 'PATIENT'   WHEN 'R-PC04' THEN 'CODE'
+                          WHEN 'R-PC05' THEN 'STOP' END                 AS field,
+           pc.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(N'Procedure ', ISNULL(pc.DESCRIPTION, N'(no description)'),
+                  N' | on ', LEFT(pc.START, 10), N' | visit ', ISNULL(pc.ENCOUNTER, N'(blank)'))  AS context,
+           CASE i.rule_id WHEN 'R-PC01' THEN pc.ENCOUNTER WHEN 'R-PC02' THEN pc.PATIENT
+                          WHEN 'R-PC03' THEN pc.PATIENT   WHEN 'R-PC04' THEN pc.CODE
+                          WHEN 'R-PC05' THEN pc.STOP END                AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-PC04' THEN N'Coding'
+                          ELSE N'Health Information Management (HIM)' END AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-PC01' THEN 'Identify the visit this procedure belongs to, or archive if it cannot be identified'
+               WHEN 'R-PC02' THEN 'Identify the patient, or archive if the patient cannot be identified'
+               WHEN 'R-PC03' THEN 'Confirm the patient from the visit and the procedure documentation'
+               WHEN 'R-PC04' THEN 'Enter the SNOMED CT procedure code from the clinical record'
+               WHEN 'R-PC05' THEN 'Enter the procedure end date and time from the clinical record'
+           END                                                          AS what_is_needed
+    FROM etl.procedure_issue_log AS i
+    LEFT JOIN cur.procedures AS pc ON pc.source_row = TRY_CAST(i.source_row AS INT)
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = pc.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action = 'Reject'
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -269,10 +332,16 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM coverage_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM procedure_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
-                                                     WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4 ELSE 5 END,
+                                                     WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4
+                                                     WHEN 'payer_transitions' THEN 5 ELSE 6 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -305,11 +374,13 @@ WITH keyed AS (
                WHEN 'conditions' THEN CONCAT(c.PATIENT, '_', c.ENCOUNTER, '_', c.CODE, '_', c.START)
                WHEN 'providers'  THEN pr.Id
                WHEN 'payer_transitions' THEN CONCAT(pt.PATIENT, '_', pt.START_DATE)
+               WHEN 'procedures' THEN CONCAT(pc.PATIENT, '_', pc.ENCOUNTER, '_', pc.CODE, '_', pc.START)
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
                              WHEN 'providers'  THEN 'Practitioner'
                              WHEN 'payer_transitions' THEN 'Coverage'
+                             WHEN 'procedures' THEN 'Procedure'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
@@ -317,11 +388,12 @@ WITH keyed AS (
     LEFT JOIN cur.conditions AS c  ON k.table_name = 'conditions' AND c.source_row  = k.source_row
     LEFT JOIN cur.providers  AS pr ON k.table_name = 'providers'  AND pr.source_row = k.source_row
     LEFT JOIN cur.payer_transitions AS pt ON k.table_name = 'payer_transitions' AND pt.source_row = k.source_row
+    LEFT JOIN cur.procedures AS pc ON k.table_name = 'procedures' AND pc.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -337,7 +409,12 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
+           WHEN EXISTS (SELECT 1 FROM etl.procedure_issue_log AS i
+                        WHERE k.table_name = 'procedures'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action = 'Reject') THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
 FROM keyed AS k
@@ -349,7 +426,12 @@ LEFT JOIN etl.practitioner_crosswalk AS xp
 LEFT JOIN etl.coverage_sources AS cs
        ON k.resource_type = 'Coverage' AND cs.record_key = k.current_key AND cs.coverage_order = '1'
 LEFT JOIN etl.coverage_crosswalk AS xc
-       ON xc.resource_type = 'Coverage' AND xc.legacy_id = cs.coverage_key AND xc.fhir_id IS NOT NULL;
+       ON xc.resource_type = 'Coverage' AND xc.legacy_id = cs.coverage_key AND xc.fhir_id IS NOT NULL
+-- Procedure: legacy row -> its Procedure key (etl.procedure_sources) -> FHIR id
+LEFT JOIN etl.procedure_sources AS ps
+       ON k.resource_type = 'Procedure' AND ps.record_key = k.current_key
+LEFT JOIN etl.procedure_crosswalk AS xpc
+       ON xpc.resource_type = 'Procedure' AND xpc.legacy_id = ps.procedure_key AND xpc.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------
