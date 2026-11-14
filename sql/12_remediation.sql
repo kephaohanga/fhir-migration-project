@@ -2,7 +2,7 @@
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
    Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers,
-   payer_transitions, procedures, allergies, medications).
+   payer_transitions, procedures, allergies, medications, observations).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -113,6 +113,34 @@ IF OBJECT_ID('etl.procedure_crosswalk') IS NULL
 CREATE TABLE etl.procedure_crosswalk (
     resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
     server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+-- Observation tables are created by src/phase2_observation.py
+IF OBJECT_ID('etl.observation_issue_log') IS NULL
+CREATE TABLE etl.observation_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.observation_sources') IS NULL
+CREATE TABLE etl.observation_sources (
+    observation_key NVARCHAR(500) NULL, record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL,
+    legacy_patient NVARCHAR(500) NULL, legacy_encounter NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.observation_crosswalk') IS NULL
+CREATE TABLE etl.observation_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.observations') IS NULL
+CREATE TABLE cur.observations (
+    DATE NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL, ENCOUNTER NVARCHAR(500) NULL,
+    CODE NVARCHAR(500) NULL, DESCRIPTION NVARCHAR(500) NULL, VALUE NVARCHAR(500) NULL,
+    UNITS NVARCHAR(500) NULL, source_row INT NULL
 );
 GO
 -- Medication tables are created by src/phase2_medication.py
@@ -440,6 +468,43 @@ medication_detail AS (
                  FROM cur.patients AS p WHERE p.Id = md.PATIENT ORDER BY p.source_row) AS pn
     WHERE i.action = 'Reject'
 ),
+-- ---------- Phase 2: observations ----------
+observation_detail AS (
+    SELECT CAST(N'observations' AS NVARCHAR(50))                        AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-OB01' THEN 'PATIENT'   WHEN 'R-OB02' THEN 'ENCOUNTER'
+                          WHEN 'R-OB03' THEN 'PATIENT'   WHEN 'R-OB04' THEN 'CODE'
+                          WHEN 'R-OB05' THEN 'DATE'      WHEN 'R-OB06' THEN 'VALUE' END AS field,
+           ob.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(N'Observation ', ISNULL(ob.DESCRIPTION, N'(no description)'),
+                  N' = ', ISNULL(ob.VALUE, N'(blank)'), N' ', ISNULL(ob.UNITS, N''),
+                  N' | on ', ISNULL(LEFT(ob.DATE, 10), N'(blank)'),
+                  N' | visit ', ISNULL(ob.ENCOUNTER, N'(blank)'))      AS context,
+           CASE i.rule_id WHEN 'R-OB01' THEN ob.PATIENT   WHEN 'R-OB02' THEN ob.ENCOUNTER
+                          WHEN 'R-OB03' THEN ob.PATIENT   WHEN 'R-OB04' THEN ob.CODE
+                          WHEN 'R-OB05' THEN ob.DATE      WHEN 'R-OB06' THEN ob.VALUE END AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-OB06' THEN N'Laboratory'
+                          ELSE N'Health Information Management (HIM)' END AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-OB01' THEN 'Identify the patient, or archive if the patient cannot be identified'
+               WHEN 'R-OB02' THEN 'Identify the visit this result was recorded at, or archive if it cannot be identified'
+               WHEN 'R-OB03' THEN 'Confirm the patient from the visit and the result'
+               WHEN 'R-OB04' THEN 'Enter the LOINC code of the test (or confirm its system and add it to the observation code map)'
+               WHEN 'R-OB05' THEN 'Enter the date and time the result was recorded'
+               WHEN 'R-OB06' THEN 'Enter the result value exactly as reported by the lab or device'
+           END                                                          AS what_is_needed
+    FROM etl.observation_issue_log AS i
+    LEFT JOIN cur.observations AS ob ON ob.source_row = TRY_CAST(i.source_row AS INT)
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = ob.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action = 'Reject'
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -470,12 +535,18 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM medication_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM observation_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
                                                      WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4
                                                      WHEN 'payer_transitions' THEN 5 WHEN 'procedures' THEN 6
-                                                     WHEN 'allergies' THEN 7 ELSE 8 END,
+                                                     WHEN 'allergies' THEN 7 WHEN 'medications' THEN 8
+                                                     ELSE 9 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -511,6 +582,7 @@ WITH keyed AS (
                WHEN 'procedures' THEN CONCAT(pc.PATIENT, '_', pc.ENCOUNTER, '_', pc.CODE, '_', pc.START)
                WHEN 'allergies'  THEN CONCAT(al.PATIENT, '_', al.ENCOUNTER, '_', al.CODE, '_', al.START)
                WHEN 'medications' THEN CONCAT(md.PATIENT, '_', md.ENCOUNTER, '_', md.CODE, '_', md.START)
+               WHEN 'observations' THEN CONCAT(ob.PATIENT, '_', ob.ENCOUNTER, '_', ob.CODE, '_', ob.DATE)
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
@@ -519,6 +591,7 @@ WITH keyed AS (
                              WHEN 'procedures' THEN 'Procedure'
                              WHEN 'allergies'  THEN 'AllergyIntolerance'
                              WHEN 'medications' THEN 'MedicationRequest'
+                             WHEN 'observations' THEN 'Observation'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
@@ -529,11 +602,12 @@ WITH keyed AS (
     LEFT JOIN cur.procedures AS pc ON k.table_name = 'procedures' AND pc.source_row = k.source_row
     LEFT JOIN cur.allergies  AS al ON k.table_name = 'allergies'  AND al.source_row = k.source_row
     LEFT JOIN cur.medications AS md ON k.table_name = 'medications' AND md.source_row = k.source_row
+    LEFT JOIN cur.observations AS ob ON k.table_name = 'observations' AND ob.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -564,8 +638,13 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action = 'Reject') THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id) IS NOT NULL
-                THEN 'Resolved - migrated'
+           WHEN EXISTS (SELECT 1 FROM etl.observation_issue_log AS i
+                        WHERE k.table_name = 'observations'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action = 'Reject') THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id)
+                IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
 FROM keyed AS k
@@ -593,7 +672,12 @@ LEFT JOIN etl.allergy_crosswalk AS xal
 LEFT JOIN etl.medication_sources AS mds
        ON k.resource_type = 'MedicationRequest' AND TRY_CAST(mds.source_row AS INT) = k.source_row
 LEFT JOIN etl.medication_crosswalk AS xmd
-       ON xmd.resource_type = 'MedicationRequest' AND xmd.legacy_id = mds.medication_key AND xmd.fhir_id IS NOT NULL;
+       ON xmd.resource_type = 'MedicationRequest' AND xmd.legacy_id = mds.medication_key AND xmd.fhir_id IS NOT NULL
+-- Observation: legacy row -> its key (etl.observation_sources, joined on the row number) -> FHIR id
+LEFT JOIN etl.observation_sources AS obs
+       ON k.resource_type = 'Observation' AND TRY_CAST(obs.source_row AS INT) = k.source_row
+LEFT JOIN etl.observation_crosswalk AS xob
+       ON xob.resource_type = 'Observation' AND xob.legacy_id = obs.observation_key AND xob.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------

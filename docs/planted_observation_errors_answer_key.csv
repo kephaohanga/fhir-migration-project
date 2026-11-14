@@ -1,0 +1,6 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+c2e09090-12c3-5e82-380b-de9b5aeb218f_00000000-0000-0000-0000-000000000000_8302-2_2014-04-25T04:14:17Z,orphan_visit,ENCOUNTER,c2e09090-12c3-5e82-5280-af58cbaf49ba,00000000-0000-0000-0000-000000000000,R-OB02,Reject
+5393ea7f-1fea-4064-9df4-460a2f662d07_288427c5-ee03-f47e-e3ac-c463e77b664b_19926-5_2017-04-26T22:34:12Z,patient_mismatch,PATIENT,288427c5-ee03-f47e-6872-def5772f427c,5393ea7f-1fea-4064-9df4-460a2f662d07,R-OB03,Reject
+59d21b6d-ef06-1497-4b9c-19918733d3f6_59d21b6d-ef06-1497-5b60-6b4783e7cdd3_8302-2_2018-13-07T23:10:30Z,invalid_date,DATE,2018-02-07T23:10:30Z,2018-13-07T23:10:30Z,R-OB05,Reject
+60b5cfed-26c3-727e-abc4-5becb36e3f75_60b5cfed-26c3-727e-fa25-ab942e5d91bd_4548-4_2016-11-15T09:01:02Z,non_numeric_value,VALUE,6.3,6.3x,R-OB06,Reject
+ea8df98b-6ed8-2f53-9f6a-80af4fa3bd0f_ea8df98b-6ed8-2f53-2759-f61257e902ff_4548-4_2017-03-29T19:47:19Z,duplicate_record,(whole row),,row appears twice,R-OB07,Fix

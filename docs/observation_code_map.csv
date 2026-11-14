@@ -1,0 +1,5 @@
+code,code_system,display
+413077008,SNOMED-CT,LogMAR visual acuity left eye (observable entity)
+413078003,SNOMED-CT,LogMAR visual acuity right eye (observable entity)
+X9999-1,LOCAL,Operative Status Value
+X9999-2,LOCAL,Priority Level

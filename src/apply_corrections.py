@@ -11,7 +11,8 @@ How it works
 
 Tables covered
   Phase 1: patients, encounters, conditions
-  Phase 2: providers, payers, payer_transitions, procedures, allergies, medications  (each only once its Phase 2 script
+  Phase 2: providers, payers, payer_transitions, procedures, allergies, medications, observations
+           (each only once its Phase 2 script
            has created the stg table)
 
 Corrections come from remediation/corrections.csv, one row per fix:
@@ -42,7 +43,7 @@ CORRECTIONS_CSV = Path("remediation/corrections.csv")
 
 PHASE1_TABLES = ("patients", "encounters", "conditions")
 PHASE2_TABLES = ("providers", "payers", "payer_transitions", "procedures", "allergies",
-                 "medications")                   # each only once its Phase 2 script has staged it
+                 "medications", "observations")   # each only once its Phase 2 script has staged it
 
 CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "corrected_value",
               "disposition", "reason", "corrected_by", "corrected_date"]
@@ -122,6 +123,8 @@ def record_key(table, row):
     """The business key staff see on the worklist: Id for most tables."""
     if table in ("conditions", "procedures", "allergies", "medications"):   # patient + visit + code + start
         return condition_key(row)
+    if table == "observations":                      # no Id column: patient + visit + code + DATE
+        return "_".join(str(row.get(c) or "") for c in ("PATIENT", "ENCOUNTER", "CODE", "DATE"))
     if table == "payer_transitions":                 # no Id column: patient + policy start
         return f"{row.get('PATIENT')}_{row.get('START_DATE')}"
     return row.get("Id")
