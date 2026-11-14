@@ -18,7 +18,11 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result, Phase 2 (medications):** 2,826 legacy prescription rows, 100% accounted for · **2,824 MedicationRequests migrated** with full history (158 active, 2,666 completed) · **31,064 of 31,064 field values matched** · RxNorm codes confirmed by the source's data dictionary · a too-broad duplicate rule was caught by profiling and fixed, recovering **8 real prescriptions (1 active)** · 5 of 5 planted defects caught, then corrected.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) is complete. **Phase 2** has completed its clinic-structure group (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance) and prescriptions (MedicationRequest). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and procedure, allergy or prescription → patient, visit and (for procedures and prescriptions) the visit's practitioner. Observation (vital signs and lab results) is the last clinical resource. Later phases are planned below in [Scope and phases](#scope-and-phases).
+**Result, Phase 2 (observations):** 35,773 legacy observation rows, 100% accounted for · **34,138 Observations migrated** (vital signs, lab results, surveys) with full history · **375,518 of 375,518 field values matched** · 1,617 simulator statistics counted and not migrated · 112 SNOMED CT and 16 local codes kept that a LOINC-only rule would have rejected · reconciliation query optimized from **over 50 minutes to 4 seconds** with indexes.
+
+**Total proven across both phases: 548,193 field values, 0 mismatches.**
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. Phase 3 (scheduling, referrals, authorizations, documents) is planned below. Later phases are planned below in [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -111,6 +115,9 @@ flowchart LR
 | 30 | `src/plant_medication_errors.py` | Phase 2: plants 5 prescription defects (orphan visit, patient mismatch, blank code, stop before start, duplicate) |
 | 31 | `src/phase2_medication.py` | Phase 2: loads the full prescription history as MedicationRequest (RxNorm), with patient, visit and prescriber links; exact-duplicate detection on every column |
 | 32 | `sql/26_medication_reconciliation.sql` | Phase 2: disposition reconciliation, field comparison, patient, visit and prescriber link checks, active vs completed, top drugs |
+| 33 | `src/plant_observation_errors.py` | Phase 2: plants 5 observation defects (orphan visit, patient mismatch, invalid date, non-numeric value, duplicate) |
+| 34 | `src/phase2_observation.py`, `docs/observation_code_map.csv` | Phase 2: loads Observation (LOINC, plus confirmed SNOMED CT and local exceptions) in bundles of 100, numeric values with UCUM units, simulator metrics counted but not migrated |
+| 35 | `sql/27_observation_reconciliation.sql` | Phase 2: creates the indexes the comparison needs, then disposition reconciliation, 375,000-value field comparison, link checks, and summaries by category, code system and test |
 
 ---
 
@@ -340,15 +347,44 @@ An allergy lost or miscoded in a conversion is a **patient-safety** risk: the ne
 
 **Remediation.** 4 rejects joined the shared worklist (orphan visit, wrong patient, blank code: owner **Pharmacy**, stop before start) and were corrected and migrated.
 
+### Phase 2, step 8: Observations (vital signs, lab results, surveys)
+
+The largest file: 35,773 rows. All clinical observations moved (trends in vitals and labs guide care), in transaction bundles of **100** to halve the load time (34,138 Observations in about 17 minutes, 0 failed bundles).
+
+| Legacy | FHIR Observation |
+|---|---|
+| `CODE`, `DESCRIPTION` | `code`: LOINC, or a confirmed exception from `docs/observation_code_map.csv` |
+| `CATEGORY` | `category` (vital-signs, laboratory, survey, social-history, exam, imaging, procedure) |
+| `TYPE` numeric | `valueQuantity`: the number plus its **UCUM** unit (`mm[Hg]`, `kg/m2`, `{score}`) |
+| `TYPE` text | `valueString`, as written |
+| `DATE` | `effectiveDateTime`; `status` = final |
+
+| Check | Result |
+|---|---|
+| Row reconciliation | 35,773 rows = **34,138 migrated** + 1,617 simulator metrics (not migrated) + 18 exact duplicates removed + 0 rejected: **PASS** |
+| Field reconciliation | **375,518 of 375,518** values matched (34,138 × 11 fields), numbers compared by value so `179.0` and `179` match but `179` and `178` do not |
+| Link integrity | **34,138 of 34,138** on the right patient and visit |
+| Code systems | LOINC 34,010 · SNOMED CT 112 · local 16 (flagged for mapping later) |
+
+**Three findings from profiling, each changing a decision:**
+
+1. **Not every row is clinical data.** 1,617 rows (`QOLS`, `QALY`, `DALY`: 539 each, exactly the rows with no category) are statistics the simulator calculates about a simulated life, not measurements taken from a patient. They get the disposition *Not migrated: simulator metric*, so they are counted, not silently dropped.
+2. **Documentation can be wrong.** Synthea's data dictionary says observation codes are LOINC, but the test run rejected 128 rows: 112 were **SNOMED CT** eye-exam results (LogMAR visual acuity) and 16 used Synthea's own **local** codes. Rejecting them would have left real results out of the new system, so they were listed with their confirmed systems in a reviewed code map. Local codes are kept, labelled as local, and flagged to be mapped to a standard code later, which is how real conversions treat in-house lab codes. *A rule that rejects valid data is as wrong as one that lets bad data in.*
+3. **Same test, same time, different value.** 18 pairs (for example creatinine 1.0 and 1.3) are kept as separate results with a flag, applying the lesson from medications; 18 rows identical in every column are removed as true duplicates.
+
+**Query optimization: from over 50 minutes to 4 seconds.** The reconciliation compares about 375,000 expected values with 375,000 values read back from the server. Without indexes, SQL Server chose a plan that effectively compared every row with every other row: the query ran for **over 50 minutes** and was cancelled. Five nonclustered indexes on the join columns, with `INCLUDE` columns so each lookup is answered from the index alone, brought the same query to **4 seconds**. Because the pipeline recreates these tables on every run (dropping any index), the indexes are created at the top of the reconciliation script, each time. *What is fast for thousands of rows can be unusable for hundreds of thousands.*
+
+**Remediation.** The 4 rejects joined the shared worklist (orphan visit, wrong patient, impossible date: owner HIM; a typing error in a lab value: owner **Laboratory**) and were corrected from the clean source and migrated.
+
 ---
 ## Scope and phases
 
-Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure, the visit links, insurance, procedures, allergies and medications (each complete and remediated) are done.
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure, the visit links, insurance, procedures, allergies, medications and observations (each complete and remediated) are done: **Phase 2 is complete**.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
-| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **In progress:** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage done (2,308 rows accounted for; 58 Coverages; 558 of 558 values matched). Procedure done (8,620 migrated; 77,580 of 77,580 values matched). AllergyIntolerance done (66 migrated; 1,122 of 1,122 values matched). MedicationRequest done (2,824 migrated, full history; 31,064 of 31,064 values matched). Observation next |
+| **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **Done.** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage done (2,308 rows accounted for; 58 Coverages; 558 of 558 values matched). Procedure done (8,620 migrated; 77,580 of 77,580 values matched). AllergyIntolerance done (66 migrated; 1,122 of 1,122 values matched). MedicationRequest done (2,824 migrated, full history; 31,064 of 31,064 values matched). Observation done (34,138 migrated; 375,518 of 375,518 values matched) |
 | **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export; would need synthetic data or the source EHR's scheduling, referral, authorization, document, lab and nursing data | Planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
@@ -357,7 +393,7 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 **Why Phase 3 adds appointments, referrals and authorizations:** these are the "open work" a clinic must carry across on go-live day: future appointments, referrals still in progress, and prior authorizations already approved or pending. A missing prior authorization is a leading cause of claim denials, so authorizations must not be lost in the switch.
 
-**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. The Phase 1 encounters were then updated in place so each visit points to its practitioner, the clinic location and the clinic organization, and a regression test confirmed Phase 1 was otherwise unchanged. Insurance (**Coverage**) followed, because pre-registration and clean claims depend on it: each patient's current policy, primary and secondary, with ended policies counted and kept in legacy. Procedures followed, the first clinical resource: each points to its patient, its visit and the visit's practitioner. Allergies came next, with every code's system confirmed through a reviewed code map, then the full prescription history. Observation (vital signs and lab results, coded in LOINC and the largest file) comes last, using the same pattern.
+**How later phases will work:** each new resource follows the same pattern as Phase 1: map it, validate it, load it with conditional create or update, read it back, reconcile it and work every reject to a documented outcome. Practitioner came first because each encounter's `PROVIDER` field already points to a provider. The clinic structure followed, modeled as **one clinic** (see *Design decisions*): one Organization, one Location, and one PractitionerRole per migrated provider. The Phase 1 encounters were then updated in place so each visit points to its practitioner, the clinic location and the clinic organization, and a regression test confirmed Phase 1 was otherwise unchanged. Insurance (**Coverage**) followed, because pre-registration and clean claims depend on it: each patient's current policy, primary and secondary, with ended policies counted and kept in legacy. Procedures followed, the first clinical resource: each points to its patient, its visit and the visit's practitioner. Allergies came next, with every code's system confirmed through a reviewed code map, then the full prescription history. Observation (vital signs and lab results, the largest file) came last, which also made it the step where query performance mattered.
 
 ### Billing and balances
 
@@ -531,6 +567,20 @@ python src\phase2_medication.py               # everything (about 57 bundles)
 
 Open `sql\26_medication_reconciliation.sql` in SSMS and press **F5**, then run `export_worklist.py`.
 
+### 33–35. Phase 2: Observations
+
+Copy `observations.csv` from Synthea's `output\csv` folder into `data\legacy\`, then:
+
+```powershell
+python src\plant_observation_errors.py        # plant 5 observation defects + answer key
+python src\phase2_observation.py --limit 1    # one bundle of 100 (a test)
+python src\phase2_observation.py              # everything (about 340 bundles, ~17 minutes)
+```
+
+Open `sql\27_observation_reconciliation.sql` in SSMS and press **F5** (it creates its indexes first; a few seconds), then run `export_worklist.py`.
+
+> **Tip:** if a test description contains a comma, the CSV wraps it in quotes; count the quoted text as one value when finding a column by position.
+
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
 
 ---
@@ -543,7 +593,7 @@ fhir-migration-project/
 │   ├── legacy/              Synthea export (clean); providers.csv is also the credentialing roster
 │   └── legacy_dirty/        Same data with planted defects (9 in Phase 1, 7 in providers.csv,
 │                            5 in payer_transitions.csv, 5 in procedures.csv, 5 in allergies.csv,
-│                            5 in medications.csv)
+│                            5 in medications.csv, 5 in observations.csv)
 ├── docs/
 │   ├── dashboard.png
 │   ├── dashboard_before_remediation.png
@@ -553,6 +603,8 @@ fhir-migration-project/
 │   ├── planted_procedure_errors_answer_key.csv
 │   ├── planted_allergy_errors_answer_key.csv
 │   ├── planted_medication_errors_answer_key.csv
+│   ├── planted_observation_errors_answer_key.csv
+│   ├── observation_code_map.csv  Confirmed non-LOINC observation codes (SNOMED CT, local)
 │   ├── allergy_code_map.csv Allergy and reaction code -> confirmed code system
 │   ├── payer_type_map.csv   Payer name -> Source of Payment Typology code
 │   ├── source_to_target_mapping.xlsx
@@ -574,6 +626,7 @@ fhir-migration-project/
 │   ├── 24_procedure_reconciliation.sql
 │   ├── 25_allergy_reconciliation.sql
 │   ├── 26_medication_reconciliation.sql
+│   ├── 27_observation_reconciliation.sql
 │   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
@@ -595,7 +648,9 @@ fhir-migration-project/
 │   ├── plant_allergy_errors.py
 │   ├── phase2_allergy.py
 │   ├── plant_medication_errors.py
-│   └── phase2_medication.py
+│   ├── phase2_medication.py
+│   ├── plant_observation_errors.py
+│   └── phase2_observation.py
 ├── requirements.txt
 └── README.md
 ```
@@ -618,6 +673,9 @@ fhir-migration-project/
 - **Profile before mapping.** Specialty values were profiled in SQL before the code mapping was finalized (all 184 providers are `GENERAL PRACTICE`). The mapping lives in a reviewable table (`docs/specialty_map.csv`), not in code, and any value missing from it is loaded as text and flagged rather than dropped.
 - **Every row gets one disposition.** Under the current-coverage-only rule, most legacy insurance rows are not migrated, so each one is given exactly one outcome (ended, current migrated, self-pay, superseded or rejected) and the totals must add up to the source rows. "Not migrated" never means "unexplained".
 - **Profiling overturned an assumption.** The first definition of "current coverage" used the latest end date and found only 1 insured patient. Profiling showed Synthea renews policies a year in advance, so the extract date was redefined as the latest policy start, with a half-open date range so a renewal is not mistaken for an overlap.
+- **The data has the final word over the documentation.** The source's data dictionary said LOINC; 112 observations were SNOMED CT. Profiling caught it before the rule rejected real results.
+- **Rejecting valid data is a failure too.** A rule that turns away real results leaves gaps in the new system, just as a rule that lets bad data in corrupts it. Unconfirmed codes go to a reviewed map, not to the reject pile by default.
+- **Design for the size of the data.** A comparison that took seconds at 77,000 values took over 50 minutes at 375,000 without indexes, and 4 seconds with them.
 - **A duplicate must be identical.** Rows that share a business key are not automatically duplicates; for prescriptions they were real, separate orders. Only rows equal on every column are removed, and same-key rows are kept and flagged.
 - **A PASS is not the end of the check.** Reconciliation proves every row has an outcome, not that each outcome is right. Counts that differ from expectations (9 duplicates where 1 was planted, 157 active where 158 exist) are profiled before they are accepted.
 - **Tolerate the tools people use.** Excel rewrites date-only values whenever it saves a CSV; the pipeline converts them back and reports each conversion instead of failing the run.
@@ -646,10 +704,12 @@ fhir-migration-project/
 | Clinical data conversion (SNOMED CT procedures, patient-visit consistency, performer derivation) | `phase2_procedure.py`, `sql/24_procedure_reconciliation.sql` |
 | Terminology validation (SNOMED CT vs RxNorm, code maps, patient-safety data) | `phase2_allergy.py`, `docs/allergy_code_map.csv`, `sql/25_allergy_reconciliation.sql` |
 | Medication history conversion, duplicate-rule validation with window functions | `phase2_medication.py`, `sql/26_medication_reconciliation.sql` |
+| Lab and vital-sign conversion (LOINC, UCUM units, numeric precision), large loads | `phase2_observation.py`, `docs/observation_code_map.csv` |
+| SQL query optimization (indexes, covering `INCLUDE` columns): 50+ minutes to 4 seconds | `sql/27_observation_reconciliation.sql` |
 | Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` (visit → practitioner → role → clinic) |
 | Safe updates to live records (optimistic locking), regression testing | `phase2_encounter_links.py` (`ifMatch`), Phase 1 reconciliation re-run |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 
