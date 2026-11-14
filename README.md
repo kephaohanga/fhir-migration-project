@@ -379,7 +379,11 @@ The largest file: 35,773 rows. All clinical observations moved (trends in vitals
 ---
 ## Scope and phases
 
-Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. This project completes **Phase 1** and proves it fully before going further. **Phase 2** has started: Practitioner (complete and remediated), the clinic structure, the visit links, insurance, procedures, allergies, medications and observations (each complete and remediated) are done: **Phase 2 is complete**.
+Real EHR conversions are usually done in phases: the core records are moved and proven first, then other record types are added on top of them. Each phase here was completed and proven before the next one started:
+
+- **Phase 1 is complete:** patients, visits and diagnoses, with every rejected record corrected or archived.
+- **Phase 2 is complete:** the clinic structure (providers, their roles, the clinic and its location), every visit linked to its provider and the clinic, current insurance, and the clinical history (procedures, allergies, prescriptions, vital signs and lab results), each reconciled and remediated.
+- **Phase 3 is planned:** the "open work" a clinic carries across on go-live day (see below).
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
