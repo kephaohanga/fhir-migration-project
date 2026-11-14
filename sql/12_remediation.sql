@@ -2,7 +2,7 @@
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
    Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers,
-   payer_transitions, procedures).
+   payer_transitions, procedures, allergies).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -113,6 +113,33 @@ IF OBJECT_ID('etl.procedure_crosswalk') IS NULL
 CREATE TABLE etl.procedure_crosswalk (
     resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
     server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+-- Allergy tables are created by src/phase2_allergy.py
+IF OBJECT_ID('etl.allergy_issue_log') IS NULL
+CREATE TABLE etl.allergy_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.allergy_sources') IS NULL
+CREATE TABLE etl.allergy_sources (
+    allergy_key NVARCHAR(500) NULL, record_key NVARCHAR(500) NULL, legacy_patient NVARCHAR(500) NULL,
+    legacy_encounter NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.allergy_crosswalk') IS NULL
+CREATE TABLE etl.allergy_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.allergies') IS NULL
+CREATE TABLE cur.allergies (
+    START NVARCHAR(500) NULL, STOP NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL,
+    ENCOUNTER NVARCHAR(500) NULL, CODE NVARCHAR(500) NULL, DESCRIPTION NVARCHAR(500) NULL,
+    source_row INT NULL
 );
 GO
 IF OBJECT_ID('cur.procedures') IS NULL
@@ -317,6 +344,40 @@ procedure_detail AS (
                  FROM cur.patients AS p WHERE p.Id = pc.PATIENT ORDER BY p.source_row) AS pn
     WHERE i.action = 'Reject'
 ),
+-- ---------- Phase 2: allergies ----------
+allergy_detail AS (
+    SELECT CAST(N'allergies' AS NVARCHAR(50))                           AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-AL01' THEN 'PATIENT'   WHEN 'R-AL02' THEN 'ENCOUNTER'
+                          WHEN 'R-AL03' THEN 'PATIENT'   WHEN 'R-AL04' THEN 'CODE'
+                          WHEN 'R-AL05' THEN 'START' END                AS field,
+           al.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(N'Allergy ', ISNULL(al.DESCRIPTION, N'(no description)'),
+                  N' | onset ', ISNULL(al.START, N'(blank)'), N' | visit ', ISNULL(al.ENCOUNTER, N'(blank)')) AS context,
+           CASE i.rule_id WHEN 'R-AL01' THEN al.PATIENT   WHEN 'R-AL02' THEN al.ENCOUNTER
+                          WHEN 'R-AL03' THEN al.PATIENT   WHEN 'R-AL04' THEN al.CODE
+                          WHEN 'R-AL05' THEN al.START END               AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-AL04' THEN N'Clinical Informatics'
+                          ELSE N'Health Information Management (HIM)' END AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-AL01' THEN 'Identify the patient, or archive if the patient cannot be identified'
+               WHEN 'R-AL02' THEN 'Identify the visit this allergy was recorded at, or archive if it cannot be identified'
+               WHEN 'R-AL03' THEN 'Confirm the patient from the visit and the allergy documentation'
+               WHEN 'R-AL04' THEN 'Confirm the allergy code from the clinical record (and add new codes to the code map)'
+               WHEN 'R-AL05' THEN 'Enter the allergy onset date (YYYY-MM-DD) from the clinical record'
+           END                                                          AS what_is_needed
+    FROM etl.allergy_issue_log AS i
+    LEFT JOIN cur.allergies AS al ON al.source_row = TRY_CAST(i.source_row AS INT)
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = al.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action = 'Reject'
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -337,11 +398,17 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM procedure_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM allergy_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
                                                      WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4
-                                                     WHEN 'payer_transitions' THEN 5 ELSE 6 END,
+                                                     WHEN 'payer_transitions' THEN 5 WHEN 'procedures' THEN 6
+                                                     ELSE 7 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -375,12 +442,14 @@ WITH keyed AS (
                WHEN 'providers'  THEN pr.Id
                WHEN 'payer_transitions' THEN CONCAT(pt.PATIENT, '_', pt.START_DATE)
                WHEN 'procedures' THEN CONCAT(pc.PATIENT, '_', pc.ENCOUNTER, '_', pc.CODE, '_', pc.START)
+               WHEN 'allergies'  THEN CONCAT(al.PATIENT, '_', al.ENCOUNTER, '_', al.CODE, '_', al.START)
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
                              WHEN 'providers'  THEN 'Practitioner'
                              WHEN 'payer_transitions' THEN 'Coverage'
                              WHEN 'procedures' THEN 'Procedure'
+                             WHEN 'allergies'  THEN 'AllergyIntolerance'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
@@ -389,11 +458,12 @@ WITH keyed AS (
     LEFT JOIN cur.providers  AS pr ON k.table_name = 'providers'  AND pr.source_row = k.source_row
     LEFT JOIN cur.payer_transitions AS pt ON k.table_name = 'payer_transitions' AND pt.source_row = k.source_row
     LEFT JOIN cur.procedures AS pc ON k.table_name = 'procedures' AND pc.source_row = k.source_row
+    LEFT JOIN cur.allergies  AS al ON k.table_name = 'allergies'  AND al.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -414,7 +484,12 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action = 'Reject') THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
+           WHEN EXISTS (SELECT 1 FROM etl.allergy_issue_log AS i
+                        WHERE k.table_name = 'allergies'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action = 'Reject') THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id) IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
 FROM keyed AS k
@@ -431,7 +506,12 @@ LEFT JOIN etl.coverage_crosswalk AS xc
 LEFT JOIN etl.procedure_sources AS ps
        ON k.resource_type = 'Procedure' AND ps.record_key = k.current_key
 LEFT JOIN etl.procedure_crosswalk AS xpc
-       ON xpc.resource_type = 'Procedure' AND xpc.legacy_id = ps.procedure_key AND xpc.fhir_id IS NOT NULL;
+       ON xpc.resource_type = 'Procedure' AND xpc.legacy_id = ps.procedure_key AND xpc.fhir_id IS NOT NULL
+-- AllergyIntolerance: legacy row -> its allergy key (etl.allergy_sources) -> FHIR id
+LEFT JOIN etl.allergy_sources AS als
+       ON k.resource_type = 'AllergyIntolerance' AND als.record_key = k.current_key
+LEFT JOIN etl.allergy_crosswalk AS xal
+       ON xal.resource_type = 'AllergyIntolerance' AND xal.legacy_id = als.allergy_key AND xal.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------
