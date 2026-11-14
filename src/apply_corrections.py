@@ -49,6 +49,7 @@ CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "cor
 
 # Columns that hold dates. Excel often re-saves 1993-07-18 as 7/18/1993, so
 # these are converted back to the YYYY-MM-DD format the pipeline expects.
+# Any other corrected value in m/d/yyyy form is converted too (see main()).
 DATE_FIELDS = {"BIRTHDATE", "DEATHDATE"}
 PROTECTED_FIELDS = {"Id", "source_row", "loaded_at"}   # identity / audit columns never change
 
@@ -188,7 +189,10 @@ def main(show_next=True):
             if not value:
                 errors.append(f"{where}: corrected_value is required for disposition Correct")
                 continue
-            if field in DATE_FIELDS:
+            # Excel re-saves date-only values as m/d/yyyy whenever the CSV is saved from Excel,
+            # in ANY column. No legacy field uses m/d/yyyy, so such a value is always an Excel
+            # rewrite: convert it back to YYYY-MM-DD (the report shows the conversion).
+            if field in DATE_FIELDS or re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", value):
                 try:
                     value, note = normalize_date(value)
                 except ValueError as e:
