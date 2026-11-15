@@ -1,0 +1,9 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+541ddf3f-75f6-fa47-ebe0-b249c61432dd,orphan_patient,PATIENT,e95ac678-666f-e6f5-eb76-c0273233acb1,00000000-0000-0000-0000-000000000000,R-RF01,Reject
+8f8db0b7-8154-1e40-c4fd-6e75a28c553d,unknown_requester,REQUESTER,3a386a22-0226-3878-94e5-9c45f7b76b40,00000000-0000-0000-0000-000000000000,R-RF02,Flag
+b8edb069-8cc4-6e95-d7c8-95886b04f283,no_diagnosis,REASON_CODE,714628002,,R-RF03,Flag
+e0c36b19-05b3-9dec-f854-fa08dbdb5323,wrong_diagnosis,REASON_CODE,431855005,278558000,R-RF03,Flag
+a754f693-66af-520d-054b-dd8c8190fe09,messy_status,STATUS,OPEN,Open ,R-RF04,Fix
+475e9cff-040d-4ba4-16c8-cafa4cc703a5,unknown_status,STATUS,SCHEDULED,WAITING,R-RF05,Reject
+1b82a4f1-778b-c8d2-4637-ee67ffeaf5df,us_date_format,AUTHORED_DATE,2026-06-28,6/28/2026,R-RF06,Fix
+4fcfb006-8743-e642-32a0-d0dba427ac75,duplicate_record,(whole row),,row appears twice,R-RF07,Fix

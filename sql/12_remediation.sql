@@ -1,8 +1,9 @@
 /* =============================================================================
    12_remediation.sql
    Step 13: turn rejected records into a staff worklist and track each fix.
-   Covers Phase 1 (patients, encounters, conditions) and Phase 2 (providers,
-   payer_transitions, procedures, allergies, medications, observations).
+   Covers Phase 1 (patients, encounters, conditions), Phase 2 (providers,
+   payer_transitions, procedures, allergies, medications, observations)
+   and Phase 3 (referrals).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -196,6 +197,35 @@ CREATE TABLE cur.allergies (
     START NVARCHAR(500) NULL, STOP NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL,
     ENCOUNTER NVARCHAR(500) NULL, CODE NVARCHAR(500) NULL, DESCRIPTION NVARCHAR(500) NULL,
     source_row INT NULL
+);
+GO
+-- Referral tables (Phase 3) are created by src/phase3_referral.py
+IF OBJECT_ID('etl.referral_issue_log') IS NULL
+CREATE TABLE etl.referral_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.referral_sources') IS NULL
+CREATE TABLE etl.referral_sources (
+    referral_key NVARCHAR(500) NULL, record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL,
+    legacy_patient NVARCHAR(500) NULL, legacy_requester NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.referral_crosswalk') IS NULL
+CREATE TABLE etl.referral_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.referrals') IS NULL
+CREATE TABLE cur.referrals (
+    REFERRAL_ID NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL, REQUESTER NVARCHAR(500) NULL,
+    SPECIALTY NVARCHAR(500) NULL, SPECIALTY_CODE NVARCHAR(500) NULL, REASON_CODE NVARCHAR(500) NULL,
+    REASON_DESCRIPTION NVARCHAR(500) NULL, AUTHORED_DATE NVARCHAR(500) NULL, STATUS NVARCHAR(500) NULL,
+    PRIORITY NVARCHAR(500) NULL, source_row INT NULL
 );
 GO
 IF OBJECT_ID('cur.procedures') IS NULL
@@ -505,6 +535,44 @@ observation_detail AS (
                  FROM cur.patients AS p WHERE p.Id = ob.PATIENT ORDER BY p.source_row) AS pn
     WHERE i.action = 'Reject'
 ),
+-- ---------- Phase 3: referrals (rejects, plus the two flags staff must fix) ----------
+referral_detail AS (
+    SELECT CAST(N'referrals' AS NVARCHAR(50))                           AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-RF01' THEN 'PATIENT'      WHEN 'R-RF02' THEN 'REQUESTER'
+                          WHEN 'R-RF03' THEN 'REASON_CODE'
+                          WHEN 'R-RF05' THEN CASE WHEN i.detail LIKE 'PRIORITY%' THEN 'PRIORITY' ELSE 'STATUS' END
+                          WHEN 'R-RF06' THEN 'AUTHORED_DATE' END        AS field,
+           rf.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(N'Referral to ', ISNULL(rf.SPECIALTY, N'(no specialty)'),
+                  N' | written ', ISNULL(rf.AUTHORED_DATE, N'(blank)'),
+                  N' | reason on file: ', ISNULL(rf.REASON_DESCRIPTION, N'(blank)')) AS context,
+           CASE i.rule_id WHEN 'R-RF01' THEN rf.PATIENT     WHEN 'R-RF02' THEN rf.REQUESTER
+                          WHEN 'R-RF03' THEN rf.REASON_CODE
+                          WHEN 'R-RF05' THEN CASE WHEN i.detail LIKE 'PRIORITY%' THEN rf.PRIORITY ELSE rf.STATUS END
+                          WHEN 'R-RF06' THEN rf.AUTHORED_DATE END       AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-RF01' THEN N'Health Information Management (HIM)'
+                          WHEN 'R-RF02' THEN N'Credentialing / Provider Enrollment'
+                          ELSE N'Referral Coordinator' END              AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-RF01' THEN 'Identify the patient, or archive if the patient cannot be identified'
+               WHEN 'R-RF02' THEN 'Identify the referring provider and enter their provider Id'
+               WHEN 'R-RF03' THEN 'Ask the referring provider for the diagnosis and enter its SNOMED CT code (it must be on the patient''s problem list), with REASON_DESCRIPTION'
+               WHEN 'R-RF05' THEN 'Confirm the referral status (OPEN, SCHEDULED or COMPLETED) or priority (ROUTINE or URGENT)'
+               WHEN 'R-RF06' THEN 'Enter the date the referral was written (YYYY-MM-DD)'
+           END                                                          AS what_is_needed
+    FROM etl.referral_issue_log AS i
+    LEFT JOIN cur.referrals AS rf ON rf.source_row = TRY_CAST(i.source_row AS INT)
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = rf.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action = 'Reject' OR i.rule_id IN ('R-RF02', 'R-RF03')
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -540,13 +608,18 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM observation_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM referral_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
                                                      WHEN 'conditions' THEN 3 WHEN 'providers' THEN 4
                                                      WHEN 'payer_transitions' THEN 5 WHEN 'procedures' THEN 6
                                                      WHEN 'allergies' THEN 7 WHEN 'medications' THEN 8
-                                                     ELSE 9 END,
+                                                     WHEN 'observations' THEN 9 ELSE 10 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -583,6 +656,7 @@ WITH keyed AS (
                WHEN 'allergies'  THEN CONCAT(al.PATIENT, '_', al.ENCOUNTER, '_', al.CODE, '_', al.START)
                WHEN 'medications' THEN CONCAT(md.PATIENT, '_', md.ENCOUNTER, '_', md.CODE, '_', md.START)
                WHEN 'observations' THEN CONCAT(ob.PATIENT, '_', ob.ENCOUNTER, '_', ob.CODE, '_', ob.DATE)
+               WHEN 'referrals'  THEN rf.REFERRAL_ID
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
@@ -592,6 +666,7 @@ WITH keyed AS (
                              WHEN 'allergies'  THEN 'AllergyIntolerance'
                              WHEN 'medications' THEN 'MedicationRequest'
                              WHEN 'observations' THEN 'Observation'
+                             WHEN 'referrals'  THEN 'ServiceRequest'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
@@ -603,11 +678,12 @@ WITH keyed AS (
     LEFT JOIN cur.allergies  AS al ON k.table_name = 'allergies'  AND al.source_row = k.source_row
     LEFT JOIN cur.medications AS md ON k.table_name = 'medications' AND md.source_row = k.source_row
     LEFT JOIN cur.observations AS ob ON k.table_name = 'observations' AND ob.source_row = k.source_row
+    LEFT JOIN cur.referrals  AS rf ON k.table_name = 'referrals'  AND rf.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -643,7 +719,12 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action = 'Reject') THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id)
+           WHEN EXISTS (SELECT 1 FROM etl.referral_issue_log AS i
+                        WHERE k.table_name = 'referrals'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id)
                 IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
@@ -677,7 +758,10 @@ LEFT JOIN etl.medication_crosswalk AS xmd
 LEFT JOIN etl.observation_sources AS obs
        ON k.resource_type = 'Observation' AND TRY_CAST(obs.source_row AS INT) = k.source_row
 LEFT JOIN etl.observation_crosswalk AS xob
-       ON xob.resource_type = 'Observation' AND xob.legacy_id = obs.observation_key AND xob.fhir_id IS NOT NULL;
+       ON xob.resource_type = 'Observation' AND xob.legacy_id = obs.observation_key AND xob.fhir_id IS NOT NULL
+-- ServiceRequest (referral): the legacy REFERRAL_ID is the key -> FHIR id
+LEFT JOIN etl.referral_crosswalk AS xrf
+       ON k.resource_type = 'ServiceRequest' AND xrf.legacy_id = k.current_key AND xrf.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------

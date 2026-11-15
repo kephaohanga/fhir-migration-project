@@ -12,8 +12,8 @@ How it works
 Tables covered
   Phase 1: patients, encounters, conditions
   Phase 2: providers, payers, payer_transitions, procedures, allergies, medications, observations
-           (each only once its Phase 2 script
-           has created the stg table)
+  Phase 3: referrals
+           (each Phase 2 / 3 table only once its script has created the stg table)
 
 Corrections come from remediation/corrections.csv, one row per fix:
   table_name, source_row, record_key, rule_id, field, corrected_value,
@@ -44,6 +44,7 @@ CORRECTIONS_CSV = Path("remediation/corrections.csv")
 PHASE1_TABLES = ("patients", "encounters", "conditions")
 PHASE2_TABLES = ("providers", "payers", "payer_transitions", "procedures", "allergies",
                  "medications", "observations")   # each only once its Phase 2 script has staged it
+PHASE3_TABLES = ("referrals",)                     # each only once its Phase 3 script has staged it
 
 CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "corrected_value",
               "disposition", "reason", "corrected_by", "corrected_date"]
@@ -52,7 +53,7 @@ CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "cor
 # these are converted back to the YYYY-MM-DD format the pipeline expects.
 # Any other corrected value in m/d/yyyy form is converted too (see main()).
 DATE_FIELDS = {"BIRTHDATE", "DEATHDATE"}
-PROTECTED_FIELDS = {"Id", "source_row", "loaded_at"}   # identity / audit columns never change
+PROTECTED_FIELDS = {"Id", "REFERRAL_ID", "source_row", "loaded_at"}   # identity / audit columns never change
 
 CORRECTIONS_DDL = """
 CREATE TABLE etl.corrections (
@@ -127,13 +128,15 @@ def record_key(table, row):
         return "_".join(str(row.get(c) or "") for c in ("PATIENT", "ENCOUNTER", "CODE", "DATE"))
     if table == "payer_transitions":                 # no Id column: patient + policy start
         return f"{row.get('PATIENT')}_{row.get('START_DATE')}"
+    if table == "referrals":                         # Phase 3 files carry their own ID column
+        return row.get("REFERRAL_ID")
     return row.get("Id")
 
 
 def available_tables(cur):
-    """Phase 1 tables always; Phase 2 tables only once they have been staged."""
+    """Phase 1 tables always; Phase 2 and 3 tables only once they have been staged."""
     tables = list(PHASE1_TABLES)
-    for table in PHASE2_TABLES:
+    for table in PHASE2_TABLES + PHASE3_TABLES:
         if cur.execute(f"SELECT OBJECT_ID('stg.{table}');").fetchone()[0] is not None:
             tables.append(table)
     return tables
@@ -166,7 +169,7 @@ def main(show_next=True):
             errors.append(f"{where}: source_row '{c.get('source_row')}' is not a number")
             continue
         if table not in tables:
-            hint = " (run its Phase 2 script first)" if table in PHASE2_TABLES else ""
+            hint = " (run its Phase 2 / 3 script first)" if table in PHASE2_TABLES + PHASE3_TABLES else ""
             errors.append(f"{where}: table_name '{table}' must be one of: {', '.join(tables)}{hint}")
             continue
         row = staging[table].get(src)
