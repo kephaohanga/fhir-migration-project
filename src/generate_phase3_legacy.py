@@ -21,7 +21,11 @@ Rules (chosen by the project owner):
     - specialist referrals: one per matching chronic condition (up to 2 specialties per
                             patient); authorization for Medicaid and private payers
                             (not Medicare / dual, as with traditional Medicare)        - NUCC
-  Outcomes: 70% approved, 20% pending, 10% denied (all payers).
+  Outcomes: 70% approved, 20% pending, 10% denied (all payers). A decision can only be in
+    the file if it was made by the extract date: a decision drawn for a later date means
+    the payer has not answered yet, so the request is PENDING.
+  Not planned surgery: procedures done as part of childbirth (episiotomy, delivery) never
+    need a prior authorization, so they are left out.
   Appointments: weekdays, 90 days after the extract date, clinic hours
     (13:00-20:30 UTC, about 8 am - 4:30 pm Eastern), no double booking per provider.
   Self-pay patients need no prior authorization; deceased patients get no future visits.
@@ -60,6 +64,7 @@ CLINIC_ADMINISTERED = {"205923", "1736854", "226719"}  # given in the clinic -> 
 DRUG_LOOKBACK_DAYS = 730                              # prescriptions active or started in the last 2 years
 SURGICAL_WORDS = re.compile(r"ectomy|otomy|ostomy|plasty|replacement|excision|repair|insertion|"
                             r"transplant|resection|amputation|fixation|arthroscop", re.I)
+NOT_PLANNED_SURGERY = re.compile(r"episiotomy|delivery|amniotomy", re.I)   # part of childbirth
 FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 rng = random.Random(SEED)
@@ -162,20 +167,31 @@ class Scheduler:
 # Generators
 # ---------------------------------------------------------------------------
 def prior_auth(ctx, patient, service_type, system, code, description, request_date, referral_id=""):
+    """Returns (authorization row, the outcome drawn).
+
+    The outcome drawn decides whether visits are booked; the row holds what the legacy
+    system knew ON THE EXTRACT DATE: a decision dated later has not happened yet, so the
+    row says PENDING. The random draws are the same either way, so every other generated
+    row (referrals included) stays exactly as before this rule was added."""
     cov = ctx["coverage"][patient]
-    decision = outcome()
+    drawn = decision = outcome()
     decision_date = request_date + timedelta(days=rng.randint(2, 14)) if decision != "PENDING" else None
+    auth_id = new_id()                                    # draws kept in their original order
+    auth_number = f"PA{rng.randint(10**7, 10**8 - 1)}" if decision == "APPROVED" else ""
+    denial = rng.choice(DENIAL_REASONS) if decision == "DENIED" else ""
+    if decision_date and decision_date > ctx["as_of"]:          # not decided by the extract date
+        decision, decision_date, auth_number, denial = "PENDING", None, "", ""
     return {
-        "AUTH_ID": new_id(), "PATIENT": patient, "PAYER": cov["payer"], "MEMBERID": cov["member"],
+        "AUTH_ID": auth_id, "PATIENT": patient, "PAYER": cov["payer"], "MEMBERID": cov["member"],
         "SERVICE_TYPE": service_type, "SERVICE_SYSTEM": system, "SERVICE_CODE": code,
         "SERVICE_DESCRIPTION": description, "REQUEST_DATE": request_date.date().isoformat(),
         "DECISION": decision, "DECISION_DATE": decision_date.date().isoformat() if decision_date else "",
-        "AUTH_NUMBER": f"PA{rng.randint(10**7, 10**8 - 1)}" if decision == "APPROVED" else "",
+        "AUTH_NUMBER": auth_number,
         "VALID_FROM": decision_date.date().isoformat() if decision == "APPROVED" else "",
         "VALID_TO": (decision_date + timedelta(days=180)).date().isoformat() if decision == "APPROVED" else "",
-        "DENIAL_REASON": rng.choice(DENIAL_REASONS) if decision == "DENIED" else "",
+        "DENIAL_REASON": denial,
         "REFERRAL_ID": referral_id,
-    }
+    }, drawn
 
 
 def appointment(patient, provider, start, end, visit_type, status, reason_code="", reason_text="",
@@ -214,10 +230,10 @@ def generate():
             continue                                        # self-pay: no authorization needed
         row = group.iloc[-1]
         request = as_of - timedelta(days=rng.randint(1, 30))
-        auth = prior_auth(ctx, p, "MEDICATION", "RxNorm", code, row["DESCRIPTION"], request)
+        auth, drawn = prior_auth(ctx, p, "MEDICATION", "RxNorm", code, row["DESCRIPTION"], request)
         auths.append(auth)
         provider = ctx["last_provider"].get(p)
-        if provider and auth["DECISION"] != "DENIED" and code in CLINIC_ADMINISTERED:
+        if provider and drawn != "DENIED" and code in CLINIC_ADMINISTERED:
             status = "SCHEDULED" if auth["DECISION"] == "APPROVED" else "PENDING AUTHORIZATION"
             for _ in range(rng.randint(1, 3)):
                 start, end = sched.book(provider, 60)
@@ -242,14 +258,21 @@ def generate():
             seen_patients.add(cand[0])
     for p, reason_code, reason_text, code, description in chosen:
         request = as_of - timedelta(days=rng.randint(1, 21))
-        auth = prior_auth(ctx, p, "PROCEDURE", "SNOMED-CT", code, description, request)
-        auths.append(auth)
+        auth, drawn = prior_auth(ctx, p, "PROCEDURE", "SNOMED-CT", code, description, request)
+        visit = None
         provider = ctx["last_provider"].get(p)
-        if provider and auth["DECISION"] != "DENIED":
+        if provider and drawn != "DENIED":
             status = "SCHEDULED" if auth["DECISION"] == "APPROVED" else "PENDING AUTHORIZATION"
             start, end = sched.book(provider, 120, after=(as_of + timedelta(days=14)).date())
-            appointments.append(appointment(p, provider, start, end, "PROCEDURE", status,
-                                            reason_code, reason_text, auth_id=auth["AUTH_ID"]))
+            visit = appointment(p, provider, start, end, "PROCEDURE", status,
+                                reason_code, reason_text, auth_id=auth["AUTH_ID"])
+        # Childbirth procedures are not planned surgery. They are still drawn above (and then
+        # dropped) so the random sequence - and every other generated row - stays unchanged.
+        if NOT_PLANNED_SURGERY.search(description):
+            continue
+        auths.append(auth)
+        if visit:
+            appointments.append(visit)
 
     # 4. Specialist referrals for active chronic conditions (first keyword match wins)
     by_patient = defaultdict(list)
@@ -279,7 +302,7 @@ def generate():
             if cov and (cov["ownership"] == "PRIVATE" or cov["name"] == "Medicaid") \
                     and referral["STATUS"] != "COMPLETED":
                 auths.append(prior_auth(ctx, p, "REFERRAL", "NUCC", nucc, f"Referral to {specialty}",
-                                        authored + timedelta(days=1), referral_id=referral["REFERRAL_ID"]))
+                                        authored + timedelta(days=1), referral_id=referral["REFERRAL_ID"])[0])
     return ctx, appointments, referrals, auths
 
 
