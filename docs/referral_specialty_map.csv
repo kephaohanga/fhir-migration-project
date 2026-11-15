@@ -1,0 +1,16 @@
+keyword,specialty,nucc_code
+hypertension,Cardiovascular Disease,207RC0000X
+heart,Cardiovascular Disease,207RC0000X
+coronary,Cardiovascular Disease,207RC0000X
+diabetes,Endocrinology Diabetes & Metabolism,207RE0101X
+kidney,Nephrology,207RN0300X
+renal,Nephrology,207RN0300X
+asthma,Pulmonary Disease,207RP1001X
+pulmonary,Pulmonary Disease,207RP1001X
+osteoarthritis,Orthopaedic Surgery,207X00000X
+rheumatoid,Rheumatology,207RR0500X
+depress,Psychiatry,2084P0800X
+anxiety,Psychiatry,2084P0800X
+neoplasm,Medical Oncology,207RX0202X
+carcinoma,Medical Oncology,207RX0202X
+cancer,Medical Oncology,207RX0202X
