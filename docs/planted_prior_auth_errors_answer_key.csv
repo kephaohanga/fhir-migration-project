@@ -1,0 +1,9 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+fe3f5cd5-f2f4-7ce7-e20a-7327f0314408,expired_authorization,VALID_TO,2027-03-29,2026-10-09,R-PA07,Flag
+6c64687b-d541-a7c5-6c41-8fca22363ded,missing_auth_number,AUTH_NUMBER,PA87602466,,R-PA05,Flag
+0dba668a-6192-9998-b2fa-12a39bd9862b,wrong_referral,REFERRAL_ID,be66c2ad-8ac2-b4aa-134f-28f9b05b6448,7a633e4e-ab02-c0b4-c6a6-e8befd0b807b,R-PA03,Reject
+c754c823-f087-9e1e-be66-ad5ffc88d53f,decision_before_request,DECISION_DATE,2026-09-03,2026-08-20,R-PA06,Reject
+aabd2db1-5347-2666-7f38-cc014845f0e7,messy_decision,DECISION,DENIED,denied ,R-PA04,Fix
+3cd49921-46db-155f-25a2-b795ab41f91e,orphan_patient,PATIENT,cf6b5139-56ec-28fb-d921-32ce06ac3ab4,00000000-0000-0000-0000-000000000000,R-PA01,Reject
+1fa5d8fc-eb62-e9d0-464d-b2c781d48c41,wrong_member_id,MEMBERID,31b5fe0c-a493-9438-2f74-8b75f772a45c,595f9fb9-fcf0-e5bc-9fcc-112c618b3c5b,R-PA02,Reject
+8abe88b2-7dee-a43f-6f8c-43134f671e5a,duplicate_record,(whole row),,row appears twice,R-PA08,Fix
