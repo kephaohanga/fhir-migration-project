@@ -1,0 +1,4 @@
+visit_type,system,code,display,text
+FOLLOW UP,http://terminology.hl7.org/CodeSystem/v2-0276,FOLLOWUP,A follow up visit from a previous appointment,Follow up
+INFUSION,http://terminology.hl7.org/CodeSystem/v2-0276,ROUTINE,Routine appointment - default if not valued,Infusion
+PROCEDURE,http://terminology.hl7.org/CodeSystem/v2-0276,ROUTINE,Routine appointment - default if not valued,Procedure

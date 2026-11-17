@@ -1,0 +1,11 @@
+record_id,error_type,column,original,planted,expected_rule,expected_action
+a3ca93cc-016a-e2e6-4e1a-efc5134cf15e,deceased_patient,PATIENT,7a58a941-bd27-086e-d622-38e5917d0df5,f6447d4f-b15c-1828-7e1e-93f820317073,R-AP02,Reject
+6c83e75c-4e85-9487-c3c2-1e93a0b54e21,double_booking,START,2026-12-11T16:30:00Z,2027-01-07T20:30:00Z,R-AP07,Flag
+6c83e75c-4e85-9487-c3c2-1e93a0b54e21,double_booking,END,2026-12-11T17:00:00Z,2027-01-07T21:00:00Z,R-AP07,Flag
+059f27d9-ed4c-9edc-21cd-74609417d417,unknown_provider,PROVIDER,6f899c2d-6cec-39ec-9422-f5b0a55e72e1,00000000-0000-0000-0000-000000000000,R-AP03,Flag
+e1f8e48b-2b63-a312-4d6b-4c078c9d10ca,messy_status,STATUS,CONFIRMED,Confirmed ,R-AP04,Fix
+7d993888-6c9a-4fcb-9ca3-5d2be7b4ca1a,end_before_start,END,2026-10-19T14:00:00Z,2026-10-19T13:00:00Z,R-AP05,Reject
+4d7466e6-f23f-f523-94da-e6027d0d3522,clinic_holiday,START,2026-10-29T18:30:00Z,2026-11-26T18:30:00Z,R-AP06,Flag
+4d7466e6-f23f-f523-94da-e6027d0d3522,clinic_holiday,END,2026-10-29T19:00:00Z,2026-11-26T19:00:00Z,R-AP06,Flag
+9541b9fc-1637-4725-2925-fda61549518f,missing_authorization,AUTH_ID,fe3f5cd5-f2f4-7ce7-e20a-7327f0314408,,R-AP08,Flag
+a33d950d-2667-365c-b923-d8799eaa2e33,duplicate_record,(whole row),,row appears twice,R-AP09,Fix

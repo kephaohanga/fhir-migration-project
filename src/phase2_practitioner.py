@@ -460,7 +460,8 @@ def get_json(url, params=None):
             print(f"      server busy ({last}) - retrying in {wait}s ...")
             time.sleep(wait)
         try:
-            resp = requests.get(url, params=params, headers={"Accept": "application/fhir+json"}, timeout=120)
+            resp = requests.get(url, params=params, timeout=120,
+                    headers={"Accept": "application/fhir+json", "Cache-Control": "no-cache"})
         except (requests.ConnectionError, requests.Timeout) as e:
             last = type(e).__name__
             continue

@@ -3,7 +3,7 @@
    Step 13: turn rejected records into a staff worklist and track each fix.
    Covers Phase 1 (patients, encounters, conditions), Phase 2 (providers,
    payer_transitions, procedures, allergies, medications, observations)
-   and Phase 3 (referrals, prior_auths).
+   and Phase 3 (referrals, prior_auths, appointments).
 
    Creates:
      rpt.v_remediation_worklist  one row per ROOT-CAUSE problem (not per cascade),
@@ -197,6 +197,28 @@ CREATE TABLE cur.allergies (
     START NVARCHAR(500) NULL, STOP NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL,
     ENCOUNTER NVARCHAR(500) NULL, CODE NVARCHAR(500) NULL, DESCRIPTION NVARCHAR(500) NULL,
     source_row INT NULL
+);
+GO
+-- Appointment tables (Phase 3) are created by src/phase3_appointment.py
+IF OBJECT_ID('etl.appointment_issue_log') IS NULL
+CREATE TABLE etl.appointment_issue_log (
+    record_key NVARCHAR(500) NULL, source_row NVARCHAR(500) NULL, rule_id NVARCHAR(500) NULL,
+    action NVARCHAR(500) NULL, detail NVARCHAR(500) NULL,
+    saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('etl.appointment_crosswalk') IS NULL
+CREATE TABLE etl.appointment_crosswalk (
+    resource_type NVARCHAR(500) NULL, legacy_id NVARCHAR(500) NULL, fhir_id NVARCHAR(500) NULL,
+    server_status NVARCHAR(500) NULL, saved_at DATETIME2 DEFAULT SYSUTCDATETIME()
+);
+GO
+IF OBJECT_ID('cur.appointments') IS NULL
+CREATE TABLE cur.appointments (
+    APPOINTMENT_ID NVARCHAR(500) NULL, PATIENT NVARCHAR(500) NULL, PROVIDER NVARCHAR(500) NULL,
+    START NVARCHAR(500) NULL, [END] NVARCHAR(500) NULL, VISIT_TYPE NVARCHAR(500) NULL,
+    STATUS NVARCHAR(500) NULL, REASON_CODE NVARCHAR(500) NULL, REASON_DESCRIPTION NVARCHAR(500) NULL,
+    AUTH_ID NVARCHAR(500) NULL, REFERRAL_ID NVARCHAR(500) NULL, source_row INT NULL
 );
 GO
 -- Prior-authorization tables (Phase 3) are created by src/phase3_prior_auth.py
@@ -640,6 +662,48 @@ prior_auth_detail AS (
                  FROM cur.patients AS p WHERE p.Id = pa.PATIENT ORDER BY p.source_row) AS pn
     WHERE i.action = 'Reject' OR i.rule_id IN ('R-PA05', 'R-PA07')
 ),
+-- ---------- Phase 3: appointments (rejects, plus the flags Scheduling / Prior Auth must act on) ----------
+appointment_detail AS (
+    SELECT CAST(N'appointments' AS NVARCHAR(50))                        AS table_name,
+           i.record_key,
+           TRY_CAST(i.source_row AS INT)                                AS source_row,
+           i.rule_id, i.detail,
+           i.saved_at                                                   AS logged_at,
+           CASE i.rule_id WHEN 'R-AP01' THEN 'PATIENT'  WHEN 'R-AP02' THEN 'PATIENT'
+                          WHEN 'R-AP03' THEN 'PROVIDER' WHEN 'R-AP04' THEN 'STATUS'
+                          WHEN 'R-AP05' THEN 'END'      WHEN 'R-AP06' THEN 'START'
+                          WHEN 'R-AP07' THEN 'START'    WHEN 'R-AP08' THEN 'AUTH_ID' END AS field,
+           ap.PATIENT                                                   AS patient_id,
+           pn.patient_name,
+           CONCAT(ISNULL(ap.VISIT_TYPE, N'(no type)'), N' | ', ISNULL(ap.STATUS, N'(no status)'),
+                  N' | ', ISNULL(ap.START, N'(blank)'), N' to ', ISNULL(ap.[END], N'(blank)'),
+                  N' | provider ', ISNULL(ap.PROVIDER, N'(blank)'))      AS context,
+           CASE i.rule_id WHEN 'R-AP01' THEN ap.PATIENT  WHEN 'R-AP02' THEN ap.PATIENT
+                          WHEN 'R-AP03' THEN ap.PROVIDER WHEN 'R-AP04' THEN ap.STATUS
+                          WHEN 'R-AP05' THEN ap.[END]    WHEN 'R-AP06' THEN ap.START
+                          WHEN 'R-AP07' THEN ap.START    WHEN 'R-AP08' THEN ap.AUTH_ID END AS current_value,
+           0                                                            AS blocked_encounters,
+           0                                                            AS blocked_conditions,
+           CASE i.rule_id WHEN 'R-AP01' THEN N'Health Information Management (HIM)'
+                          WHEN 'R-AP03' THEN N'Credentialing / Provider Enrollment'
+                          WHEN 'R-AP08' THEN N'Prior Authorization'
+                          ELSE N'Scheduling' END                        AS suggested_owner,
+           CASE i.rule_id
+               WHEN 'R-AP01' THEN 'Identify the patient, or archive if the patient cannot be identified'
+               WHEN 'R-AP02' THEN 'The patient has died: if the visit was booked on the wrong record, enter the correct patient; otherwise archive (cancel) the visit'
+               WHEN 'R-AP03' THEN 'Identify the provider the visit is booked with and enter their provider Id'
+               WHEN 'R-AP04' THEN 'Confirm the appointment status (SCHEDULED, CONFIRMED, CANCELLED or PENDING AUTHORIZATION)'
+               WHEN 'R-AP05' THEN 'Enter the correct END date-time (YYYY-MM-DDTHH:MM:SSZ), after START'
+               WHEN 'R-AP06' THEN 'The clinic is closed then: rebook and enter the new START and END'
+               WHEN 'R-AP07' THEN 'The provider is already booked then: rebook and enter the new START and END'
+               WHEN 'R-AP08' THEN 'Obtain or confirm the prior authorization for this service and enter its AUTH_ID'
+           END                                                          AS what_is_needed
+    FROM etl.appointment_issue_log AS i
+    LEFT JOIN cur.appointments AS ap ON ap.source_row = TRY_CAST(i.source_row AS INT)
+    OUTER APPLY (SELECT TOP (1) NULLIF(LTRIM(CONCAT(p.FIRST, ' ', p.LAST)), '') AS patient_name
+                 FROM cur.patients AS p WHERE p.Id = ap.PATIENT ORDER BY p.source_row) AS pn
+    WHERE i.action IN ('Reject', 'Flag')
+),
 all_detail AS (
     SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
            patient_id, patient_name, context, current_value,
@@ -685,6 +749,11 @@ all_detail AS (
            patient_id, patient_name, context, current_value,
            blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
     FROM prior_auth_detail
+    UNION ALL
+    SELECT table_name, record_key, source_row, rule_id, detail, logged_at, field,
+           patient_id, patient_name, context, current_value,
+           blocked_encounters, blocked_conditions, suggested_owner, what_is_needed
+    FROM appointment_detail
 )
 SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions DESC,
                                    CASE d.table_name WHEN 'patients' THEN 1 WHEN 'encounters' THEN 2
@@ -692,7 +761,7 @@ SELECT ROW_NUMBER() OVER (ORDER BY d.blocked_encounters + d.blocked_conditions D
                                                      WHEN 'payer_transitions' THEN 5 WHEN 'procedures' THEN 6
                                                      WHEN 'allergies' THEN 7 WHEN 'medications' THEN 8
                                                      WHEN 'observations' THEN 9 WHEN 'referrals' THEN 10
-                                                     ELSE 11 END,
+                                                     WHEN 'prior_auths' THEN 11 ELSE 12 END,
                                    d.source_row)                        AS priority,
        CASE
            WHEN k.disposition = 'Archive'                         THEN 'Archived - not migrated'
@@ -731,6 +800,7 @@ WITH keyed AS (
                WHEN 'observations' THEN CONCAT(ob.PATIENT, '_', ob.ENCOUNTER, '_', ob.CODE, '_', ob.DATE)
                WHEN 'referrals'  THEN rf.REFERRAL_ID
                WHEN 'prior_auths' THEN pa.AUTH_ID
+               WHEN 'appointments' THEN ap.APPOINTMENT_ID
            END AS current_key,
            CASE k.table_name WHEN 'patients'   THEN 'Patient'
                              WHEN 'encounters' THEN 'Encounter'
@@ -742,6 +812,7 @@ WITH keyed AS (
                              WHEN 'observations' THEN 'Observation'
                              WHEN 'referrals'  THEN 'ServiceRequest'
                              WHEN 'prior_auths' THEN 'Claim'
+                             WHEN 'appointments' THEN 'Appointment'
                              ELSE 'Condition' END AS resource_type
     FROM etl.corrections AS k
     LEFT JOIN cur.patients   AS p  ON k.table_name = 'patients'   AND p.source_row  = k.source_row
@@ -755,11 +826,12 @@ WITH keyed AS (
     LEFT JOIN cur.observations AS ob ON k.table_name = 'observations' AND ob.source_row = k.source_row
     LEFT JOIN cur.referrals  AS rf ON k.table_name = 'referrals'  AND rf.source_row = k.source_row
     LEFT JOIN cur.prior_auths AS pa ON k.table_name = 'prior_auths' AND pa.source_row = k.source_row
+    LEFT JOIN cur.appointments AS ap ON k.table_name = 'appointments' AND ap.source_row = k.source_row
 )
 SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
        k.original_value, k.corrected_value, k.disposition, k.reason,
        k.corrected_by, k.corrected_date, k.applied_at,
-       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id, xpa.fhir_id) AS fhir_id,
+       COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id, xpa.fhir_id, xap.fhir_id) AS fhir_id,
        CASE
            WHEN k.disposition = 'Archive' THEN 'Archived - not migrated'
            WHEN EXISTS (SELECT 1 FROM etl.issue_log AS i
@@ -805,7 +877,12 @@ SELECT k.correction_id, k.table_name, k.source_row, k.rule_id, k.field_name,
                           AND TRY_CAST(i.source_row AS INT) = k.source_row
                           AND i.rule_id = k.rule_id
                           AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
-           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id, xpa.fhir_id)
+           WHEN EXISTS (SELECT 1 FROM etl.appointment_issue_log AS i
+                        WHERE k.table_name = 'appointments'
+                          AND TRY_CAST(i.source_row AS INT) = k.source_row
+                          AND i.rule_id = k.rule_id
+                          AND i.action IN ('Reject', 'Flag')) THEN 'Still failing - review'
+           WHEN COALESCE(x.fhir_id, xp.fhir_id, xc.fhir_id, xpc.fhir_id, xal.fhir_id, xmd.fhir_id, xob.fhir_id, xrf.fhir_id, xpa.fhir_id, xap.fhir_id)
                 IS NOT NULL THEN 'Resolved - migrated'
            ELSE 'Resolved - awaiting load'
        END AS outcome
@@ -846,7 +923,10 @@ LEFT JOIN etl.referral_crosswalk AS xrf
 -- Claim (prior authorization request): the legacy AUTH_ID is the key -> FHIR id
 LEFT JOIN etl.prior_auth_crosswalk AS xpa
        ON k.resource_type = 'Claim' AND xpa.resource_type = 'Claim'
-      AND xpa.legacy_id = k.current_key AND xpa.fhir_id IS NOT NULL;
+      AND xpa.legacy_id = k.current_key AND xpa.fhir_id IS NOT NULL
+-- Appointment: the legacy APPOINTMENT_ID is the key -> FHIR id
+LEFT JOIN etl.appointment_crosswalk AS xap
+       ON k.resource_type = 'Appointment' AND xap.legacy_id = k.current_key AND xap.fhir_id IS NOT NULL;
 GO
 
 /* -----------------------------------------------------------------------------

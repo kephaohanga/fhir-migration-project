@@ -12,7 +12,7 @@ How it works
 Tables covered
   Phase 1: patients, encounters, conditions
   Phase 2: providers, payers, payer_transitions, procedures, allergies, medications, observations
-  Phase 3: referrals, prior_auths
+  Phase 3: referrals, prior_auths, appointments
            (each Phase 2 / 3 table only once its script has created the stg table)
 
 Corrections come from remediation/corrections.csv, one row per fix:
@@ -44,7 +44,7 @@ CORRECTIONS_CSV = Path("remediation/corrections.csv")
 PHASE1_TABLES = ("patients", "encounters", "conditions")
 PHASE2_TABLES = ("providers", "payers", "payer_transitions", "procedures", "allergies",
                  "medications", "observations")   # each only once its Phase 2 script has staged it
-PHASE3_TABLES = ("referrals", "prior_auths")                     # each only once its Phase 3 script has staged it
+PHASE3_TABLES = ("referrals", "prior_auths", "appointments")                     # each only once its Phase 3 script has staged it
 
 CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "corrected_value",
               "disposition", "reason", "corrected_by", "corrected_date"]
@@ -54,7 +54,7 @@ CSV_FIELDS = ["table_name", "source_row", "record_key", "rule_id", "field", "cor
 # Any other corrected value in m/d/yyyy form is converted too (see main()).
 DATE_FIELDS = {"BIRTHDATE", "DEATHDATE"}
 PROTECTED_FIELDS = {"source_row", "loaded_at"}        # audit columns never change
-ID_COLUMN = {"referrals": "REFERRAL_ID", "prior_auths": "AUTH_ID"}   # a table's own ID never changes;
+ID_COLUMN = {"referrals": "REFERRAL_ID", "prior_auths": "AUTH_ID", "appointments": "APPOINTMENT_ID"}   # a table's own ID never changes;
                                                       # other tables use Id. (REFERRAL_ID in prior_auths
                                                       # is a link to a referral, so it CAN be corrected.)
 
@@ -135,6 +135,8 @@ def record_key(table, row):
         return row.get("REFERRAL_ID")
     if table == "prior_auths":
         return row.get("AUTH_ID")
+    if table == "appointments":
+        return row.get("APPOINTMENT_ID")
     return row.get("Id")
 
 
