@@ -24,9 +24,11 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result, Phase 3 (prior authorizations):** 18 legacy rows, 100% accounted for · **17 Claims** (the requests) and **12 ClaimResponses** (the payer decisions; the 5 pending have none yet) · **365 of 365 field values matched** · every request linked to its patient, payer, policy and, for referrals, the same patient's referral with the same specialty · an expired approval and a missing authorization number caught before go-live · 8 of 8 planted defects caught, then corrected.
 
-**Total proven so far: 549,039 field values, 0 mismatches.**
+**Result, Phase 3 (appointments):** 68 legacy rows, 100% accounted for · **67 Appointments migrated** (1 duplicate removed) · **871 of 871 field values matched** · every visit linked to its patient, provider and clinic location, and every infusion to its prior authorization · a go-live safety check of the active schedule found **0 unsafe visits** after remediation (nobody deceased, clinic open, no double bookings, every infusion authorized) · 8 of 8 planted defects caught, then corrected.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. **Phase 3** (the open work carried across on go-live day) is under way: referrals (ServiceRequest) and prior authorizations (Claim + ClaimResponse) are done; appointments are next. See [Scope and phases](#scope-and-phases).
+**Total proven so far: 549,910 field values, 0 mismatches.**
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. **Phase 3** (the open work carried across on go-live day) has its core in place: referrals (ServiceRequest), prior authorizations (Claim + ClaimResponse) and appointments (Appointment) are done. See [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -451,6 +453,43 @@ One legacy row holds two things, so it becomes **two** FHIR resources: a **Claim
 
 **Remediation.** 6 problems joined the shared worklist: 4 rejects (unknown patient: HIM; a member ID belonging to another patient: Insurance Verification; another patient's referral: Referral Coordinator; a decision dated before its request) and the 2 flags above. All were corrected and migrated; a messy decision value and a duplicate row are fixed automatically. The safety checks also caught a reviewer's slip during correction: an authorization number entered as the record's ID would have passed the "not blank" rule, so each corrected ID or number is reviewed against its expected shape (an authorization number is `PA` + 8 digits) before re-running.
 
+### Phase 3, step 3: Appointments
+
+An appointment is the last piece of open work, and it links to almost everything migrated before it: the patient, the provider and the clinic location (Phases 1 and 2), the referral (step 1) and the prior authorization (step 2).
+
+| Legacy | FHIR Appointment |
+|---|---|
+| `APPOINTMENT_ID` | `identifier` |
+| `STATUS` | `status` **and** the patient participant's own `status` (table below) |
+| `VISIT_TYPE` | `appointmentType`, through a reviewable map (`docs/visit_type_map.csv`, HL7 v2-0276 codes) with the legacy name kept as text |
+| `START`, `END` | `start`, `end`, `minutesDuration` |
+| `PATIENT`, `PROVIDER`, *(the clinic)* | `participant`: Patient, Practitioner, Location |
+| `AUTH_ID` | `supportingInformation`: the prior authorization Claim from step 2 |
+| `REFERRAL_ID`, `REASON_CODE` | `basedOn` (ServiceRequest), `reasonCode`, when present |
+
+| Legacy status | Appointment status | Patient's status |
+|---|---|---|
+| SCHEDULED | booked | needs-action (not yet confirmed) |
+| CONFIRMED | booked | accepted |
+| CANCELLED | cancelled | declined |
+| PENDING AUTHORIZATION | pending | needs-action |
+
+| Check | Result |
+|---|---|
+| Row reconciliation | 68 rows = **67 migrated** + 1 duplicate removed + 0 rejected: **PASS** |
+| Field reconciliation | **871 of 871** values matched (67 × 13 fields) |
+| Link integrity | 67 of 67 on the right patient, provider and clinic location; both infusions on the Epogen authorization |
+| Status | 42 scheduled, 16 confirmed, 9 cancelled, each with the matching patient status |
+| Go-live safety | 58 active visits: 0 for a deceased patient, 0 when the clinic is closed, 0 double bookings, 0 infusions without a valid authorization |
+
+**Using the standard instead of an extension.** For referrals, FHIR had no "scheduled" status, so an extension kept the legacy value. For appointments, FHIR already has a place for the difference between SCHEDULED and CONFIRMED: each participant has its own status, so "the patient confirmed" is stored as the patient's `accepted`. Checking the standard first avoids extensions that other systems would not understand.
+
+**A go-live safety check, not only a data check.** Beyond matching values, the reconciliation asks of every active visit: is the patient alive, is the clinic open, is the provider free, is the service authorized? Before remediation it listed 4 unsafe visits: an infusion with no authorization, a visit on Thanksgiving, and a double booking (two patients with the same provider at the same time). An appointment for a deceased patient (booked on the wrong patient's record) was rejected outright. Each went to the team that would act on it: **Scheduling**, **Credentialing** or **Prior Authorization**.
+
+**Two lessons from testing.** (1) The public FHIR server returns a *stored* answer when the same search is repeated within about a minute, so the extract after a quick second load found only the first 50 appointments; searches now ask for a fresh answer (`Cache-Control: no-cache`). (2) The go-live report first counted 59 active visits instead of 58 (67 migrated − 9 cancelled): a join to the patient table matched one patient twice (Phase 1's planted duplicate). It now looks up one row per patient. Checking a total against a number calculated another way is what caught it.
+
+**Remediation.** 6 problems joined the shared worklist (2 rejects, 4 flags); all were corrected and migrated. A moved visit needs two corrections, `START` and `END`, or it would end before it starts.
+
 ---
 ## Scope and phases
 
@@ -458,13 +497,13 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 - **Phase 1 is complete:** patients, visits and diagnoses, with every rejected record corrected or archived.
 - **Phase 2 is complete:** the clinic structure (providers, their roles, the clinic and its location), every visit linked to its provider and the clinic, current insurance, and the clinical history (procedures, allergies, prescriptions, vital signs and lab results), each reconciled and remediated.
-- **Phase 3 is under way:** the "open work" a clinic carries across on go-live day (see below). Referrals and prior authorizations are done; appointments are next.
+- **Phase 3's core is complete:** the "open work" a clinic carries across on go-live day (see below): referrals, prior authorizations and appointments. Documents, results and medication administration remain planned.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
 | **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **Done.** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage done (2,308 rows accounted for; 58 Coverages; 558 of 558 values matched). Procedure done (8,620 migrated; 77,580 of 77,580 values matched). AllergyIntolerance done (66 migrated; 1,122 of 1,122 values matched). MedicationRequest done (2,824 migrated, full history; 31,064 of 31,064 values matched). Observation done (34,138 migrated; 375,518 of 375,518 values matched) |
-| **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export. Appointments, referrals and prior authorizations are generated by `generate_phase3_legacy.py` from the migrated patients, providers, conditions, procedures, prescriptions and coverage. Documents and results would need the source EHR's data | **In progress.** ServiceRequest (referrals) done (38 rows → 37 migrated, 1 duplicate removed; 481 of 481 values matched). Claim + ClaimResponse (prior authorizations) done (18 rows → 17 Claims and 12 ClaimResponses, 1 duplicate removed; 365 of 365 values matched). Appointment next; documents and results planned |
+| **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export. Appointments, referrals and prior authorizations are generated by `generate_phase3_legacy.py` from the migrated patients, providers, conditions, procedures, prescriptions and coverage. Documents and results would need the source EHR's data | **In progress.** ServiceRequest (referrals) done (38 rows → 37 migrated, 1 duplicate removed; 481 of 481 values matched). Claim + ClaimResponse (prior authorizations) done (18 rows → 17 Claims and 12 ClaimResponses, 1 duplicate removed; 365 of 365 values matched). Appointment done (68 rows → 67 migrated, 1 duplicate removed; 871 of 871 values matched; 0 unsafe visits at go-live). Documents, results and medication administration planned |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
 
@@ -680,6 +719,17 @@ python src\phase3_prior_auth.py              # Claims first, then ClaimResponses
 
 Open `sql\29_prior_auth_reconciliation.sql` in SSMS and press **F5**, then run `export_worklist.py`. In `prior_auths.csv`, `AUTH_ID` is the record's own ID and `AUTH_NUMBER` is the payer's number (`PA` + 8 digits): a correction of the number takes the second.
 
+### 43–46. Phase 3: Appointments
+
+```powershell
+python src\profile_appointments.py           # read-only profile of appointments.csv
+python src\plant_appointment_errors.py       # plant 8 appointment defects + answer key
+python src\phase3_appointment.py --limit 1   # one bundle of 50 (a test)
+python src\phase3_appointment.py
+```
+
+Open `sql\30_appointment_reconciliation.sql` in SSMS and press **F5**, then run `export_worklist.py`. Grid 5 is the go-live safety check. A rebooked visit needs two lines in `corrections.csv`: `START` and `END`.
+
 > **Tip:** if a test description contains a comma, the CSV wraps it in quotes; count the quoted text as one value when finding a column by position.
 
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
@@ -696,7 +746,7 @@ fhir-migration-project/
 │   └── legacy_dirty/        Same data with planted defects (9 in Phase 1, 7 in providers.csv,
 │                            5 in payer_transitions.csv, 5 in procedures.csv, 5 in allergies.csv,
 │                            5 in medications.csv, 5 in observations.csv, 8 in referrals.csv,
-│                            8 in prior_auths.csv)
+│                            8 in prior_auths.csv, 8 in appointments.csv)
 ├── docs/
 │   ├── dashboard.png
 │   ├── dashboard_before_remediation.png
@@ -709,10 +759,12 @@ fhir-migration-project/
 │   ├── planted_observation_errors_answer_key.csv
 │   ├── planted_referral_errors_answer_key.csv
 │   ├── planted_prior_auth_errors_answer_key.csv
+│   ├── planted_appointment_errors_answer_key.csv
 │   ├── observation_code_map.csv  Confirmed non-LOINC observation codes (SNOMED CT, local)
 │   ├── allergy_code_map.csv Allergy and reaction code -> confirmed code system
 │   ├── payer_type_map.csv   Payer name -> Source of Payment Typology code
 │   ├── referral_specialty_map.csv  Condition keyword -> referral specialty (NUCC)
+│   ├── visit_type_map.csv   Legacy visit type -> HL7 appointment type
 │   ├── source_to_target_mapping.xlsx
 │   └── specialty_map.csv    Legacy specialty text -> NUCC provider taxonomy code
 ├── powerbi/
@@ -735,6 +787,7 @@ fhir-migration-project/
 │   ├── 27_observation_reconciliation.sql
 │   ├── 28_referral_reconciliation.sql
 │   ├── 29_prior_auth_reconciliation.sql
+│   ├── 30_appointment_reconciliation.sql
 │   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
@@ -765,7 +818,10 @@ fhir-migration-project/
 │   ├── phase3_referral.py
 │   ├── profile_prior_auths.py
 │   ├── plant_prior_auth_errors.py
-│   └── phase3_prior_auth.py
+│   ├── phase3_prior_auth.py
+│   ├── profile_appointments.py
+│   ├── plant_appointment_errors.py
+│   └── phase3_appointment.py
 ├── requirements.txt
 └── README.md
 ```
@@ -800,6 +856,8 @@ fhir-migration-project/
 - **Regression testing.** After any change to migrated records, the earlier reconciliation is re-run; Phase 1 still matched 44,765 of 44,765 after the visit links were added.
 - **Prove links, not just counts.** The clinic-structure reconciliation checks that each role points to the practitioner migrated from the *same* legacy provider, so a role attached to the wrong person would fail even if every count matched.
 - **Exact comparison.** Field reconciliation uses a binary collation and a NULL-safe comparison, and compares against the corrected values, so differences in case, whitespace or unapproved changes are not hidden.
+- **Check the standard before extending it.** An extension is used only when FHIR truly lacks a field (the referral's legacy status); when FHIR already has one (the patient's confirmation of an appointment, as the participant's status), the standard field is used.
+- **Prove the data is safe to use, not only correct.** The appointment reconciliation checks the go-live schedule itself: no visits for deceased patients, on clinic holidays, double-booked, or for services without a valid authorization.
 - **A record is only as current as its extract date.** A payer decision dated after the extract cannot be in a legacy export, and an approval that ended before it is expired, however it is labelled. Both are judged against the extract date (2026-10-10), not today's date.
 - **One legacy row can become several resources.** A prior authorization is split into the request (Claim) and the decision (ClaimResponse); a missing decision is represented by a missing response, not an invented status.
 - **Keep what the target cannot express.** When a legacy value has no FHIR code (a SCHEDULED referral), the nearest standard code is used and the original is kept in an extension, so no distinction staff rely on is lost.
@@ -827,12 +885,13 @@ fhir-migration-project/
 | Lab and vital-sign conversion (LOINC, UCUM units, numeric precision), large loads | `phase2_observation.py`, `docs/observation_code_map.csv` |
 | Referral conversion (ServiceRequest, NUCC specialties, FHIR extensions, diagnosis validation against the problem list) | `phase3_referral.py`, `sql/28_referral_reconciliation.sql` |
 | Prior authorization conversion (Claim + ClaimResponse, payer and policy links, expired and incomplete approvals) - revenue-cycle knowledge applied to migration | `phase3_prior_auth.py`, `sql/29_prior_auth_reconciliation.sql` |
+| Scheduling conversion (Appointment, participant statuses, go-live safety checks: deceased patients, clinic days, double booking, authorization) | `phase3_appointment.py`, `sql/30_appointment_reconciliation.sql` |
 | Synthetic test-data generation (seeded, rule-based, linked to migrated records) | `generate_phase3_legacy.py` |
 | SQL query optimization (indexes, covering `INCLUDE` columns): 50+ minutes to 4 seconds | `sql/27_observation_reconciliation.sql` |
 | Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` (visit → practitioner → role → clinic) |
 | Safe updates to live records (optimistic locking), regression testing | `phase2_encounter_links.py` (`ifMatch`), Phase 1 reconciliation re-run |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql`, `sql/28_referral_reconciliation.sql`, `sql/29_prior_auth_reconciliation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql`, `sql/28_referral_reconciliation.sql`, `sql/29_prior_auth_reconciliation.sql`, `sql/30_appointment_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 
