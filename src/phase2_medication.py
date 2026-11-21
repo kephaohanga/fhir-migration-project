@@ -13,8 +13,13 @@ Code system: Synthea's data dictionary states that CODE is RxNorm and
 REASONCODE is SNOMED CT - confirmed by the source's documentation, not
 guessed. A sanity rule still rejects a code that cannot be RxNorm.
 
+Update (Phase 3, step 4): each drug now has its own FHIR Medication record (the drug
+catalogue built by phase3_medication.py), and every prescription POINTS to it with
+medicationReference instead of repeating the RxNorm code and name. Run phase3_medication.py
+first; this script stops if a prescribed drug is missing from the catalogue.
+
 Mapping:
-  CODE, DESCRIPTION        -> medicationCodeableConcept   RxNorm
+  CODE                     -> medicationReference         Medication (drug catalogue, by RxNorm code)
   STOP blank / present     -> status                      active / completed
   (always)                 -> intent                      order
   PATIENT                  -> subject                     Patient (must be the visit's patient)
@@ -86,16 +91,15 @@ XWALK_COLS = ["resource_type", "legacy_id", "fhir_id", "server_status"]
 
 
 def flatten_medication(r):
-    coding = next((c for c in (r.get("medicationCodeableConcept") or {}).get("coding", [])
-                   if c.get("system") == SYS_RXNORM), {})
+    drug = r.get("medicationReference") or {}
     reason = next((c.get("code") for rc in r.get("reasonCode", []) for c in rc.get("coding", [])
                    if c.get("system") == SYS_SNOMED), None)
     validity = (r.get("dispenseRequest") or {}).get("validityPeriod") or {}
     return {
         "status": r.get("status"),
         "intent": r.get("intent"),
-        "code": coding.get("code"),
-        "code_display": coding.get("display"),
+        "medication_ref": drug.get("reference"),
+        "medication_display": drug.get("display"),
         "subject_ref": (r.get("subject") or {}).get("reference"),
         "encounter_ref": (r.get("encounter") or {}).get("reference"),
         "authored_on": r.get("authoredOn"),
@@ -136,7 +140,8 @@ def stage():
 # ---------------------------------------------------------------------------
 # 3. TRANSFORM
 # ---------------------------------------------------------------------------
-def transform(rows, encounters, enc_xwalk, patient_xwalk, prac_xwalk, expected):
+def transform(rows, encounters, enc_xwalk, patient_xwalk, prac_xwalk, drugs, expected):
+    """drugs: {RxNorm code: (Medication FHIR id, catalogue name)} from phase3_medication.py"""
     issues, dispositions, requests, sources = [], [], [], []
     seen_rows = set()          # full-row signatures: for EXACT duplicates
     used_ids = {}              # FHIR identifier -> source row that took it
@@ -205,9 +210,7 @@ def transform(rows, encounters, enc_xwalk, patient_xwalk, prac_xwalk, expected):
             "identifier": [{"system": SYS_MEDICATION, "value": medication_key}],
             "status": "completed" if v(r, "STOP") else "active",
             "intent": "order",
-            "medicationCodeableConcept": {
-                "coding": [{"system": SYS_RXNORM, "code": code, "display": v(r, "DESCRIPTION")}],
-                "text": v(r, "DESCRIPTION")},
+            "medicationReference": {"reference": f"Medication/{drugs[code][0]}", "display": drugs[code][1]},
             "subject": {"reference": f"Patient/{patient_xwalk[patient]}"},
             "encounter": {"reference": f"Encounter/{enc_xwalk[enc_id]}"},
             "authoredOn": v(r, "START"),
@@ -336,12 +339,21 @@ def main():
         "SELECT legacy_id, fhir_id FROM etl.fhir_crosswalk WHERE resource_type = 'Patient' AND fhir_id IS NOT NULL;")}
     prac_xwalk = {r["legacy_id"]: r["fhir_id"] for r in read_table(
         "SELECT legacy_id, fhir_id FROM etl.practitioner_crosswalk WHERE fhir_id IS NOT NULL;")}
-    print(f"   cur.medications {len(rows)} rows; migrated visits {len(enc_xwalk)}, "
+    drugs = {r["code"]: (r["fhir_id"], r["display"]) for r in read_table("""
+        SELECT c.code, c.display, x.fhir_id
+        FROM etl.drug_catalogue AS c
+        JOIN etl.drug_crosswalk AS x ON x.legacy_id = c.code AND x.fhir_id IS NOT NULL;""")}
+    prescribed = {(r.get("CODE") or "").strip() for r in rows
+                  if (r.get("CODE") or "").strip().isdigit() and not SNOMED_TAG.search(v(r, "DESCRIPTION") or "")}
+    if prescribed - set(drugs):
+        raise SystemExit(f"{len(prescribed - set(drugs))} prescribed drug(s) have no Medication record yet "
+                         f"(e.g. {sorted(prescribed - set(drugs))[:3]}) - run  python src\\phase3_medication.py  first.")
+    print(f"   cur.medications {len(rows)} rows; drugs in the catalogue {len(drugs)}; migrated visits {len(enc_xwalk)}, "
           f"patients {len(patient_xwalk)}, practitioners {len(prac_xwalk)}")
 
     expected = []
     requests, issues, dispositions, sources = transform(rows, encounters, enc_xwalk, patient_xwalk,
-                                                        prac_xwalk, expected)
+                                                        prac_xwalk, drugs, expected)
     save_table("etl.medication_issue_log", issues, ISSUE_COLS)
     save_table("etl.medication_disposition", dispositions, DISPOSITION_COLS)
     save_table("etl.medication_sources", sources, SOURCE_COLS)

@@ -1,0 +1,7 @@
+panel_a,panel_b,combined_panel,combined_display,why
+51990-0,24325-3,24323-8,Comprehensive metabolic 2000 panel - Serum or Plasma,"basic metabolic + hepatic tests ordered together = one comprehensive metabolic panel (CPT 80053), not two panels"
+24321-2,24325-3,24323-8,Comprehensive metabolic 2000 panel - Serum or Plasma,"same, serum version"
+24321-2,51990-0,24321-2,Basic metabolic 2000 panel - Serum or Plasma,an eGFR reported with a serum basic metabolic panel belongs to it
+24323-8,51990-0,24323-8,Comprehensive metabolic 2000 panel - Serum or Plasma,an eGFR reported with a comprehensive metabolic panel belongs to it
+58410-2,57021-8,57021-8,CBC W Auto Differential panel - Blood,blood count + differential ordered together = one CBC with differential
+24321-2,24323-8,24323-8,Comprehensive metabolic 2000 panel - Serum or Plasma,a basic metabolic panel in the same draw as a comprehensive one is part of it

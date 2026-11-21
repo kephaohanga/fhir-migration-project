@@ -1,0 +1,85 @@
+test_code,test_name,panel_code,panel_display
+49765-1,Calcium,51990-0,Basic metabolic panel - Blood
+20565-8,Carbon dioxide total,51990-0,Basic metabolic panel - Blood
+2069-3,Chloride,51990-0,Basic metabolic panel - Blood
+38483-4,Creatinine,51990-0,Basic metabolic panel - Blood
+2339-0,Glucose,51990-0,Basic metabolic panel - Blood
+6298-4,Potassium,51990-0,Basic metabolic panel - Blood
+2947-0,Sodium,51990-0,Basic metabolic panel - Blood
+6299-2,Urea nitrogen,51990-0,Basic metabolic panel - Blood
+33914-3,eGFR (calculated from creatinine),51990-0,Basic metabolic panel - Blood
+17861-6,Calcium,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2028-9,Carbon dioxide total,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2075-0,Chloride,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2160-0,Creatinine,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2345-7,Glucose,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2823-3,Potassium,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+2951-2,Sodium,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+3094-0,Urea nitrogen,24321-2,Basic metabolic 2000 panel - Serum or Plasma
+1742-6,ALT,24325-3,Hepatic function 2000 panel - Serum or Plasma
+1751-7,Albumin,24325-3,Hepatic function 2000 panel - Serum or Plasma
+6768-6,Alkaline phosphatase,24325-3,Hepatic function 2000 panel - Serum or Plasma
+1920-8,AST,24325-3,Hepatic function 2000 panel - Serum or Plasma
+1975-2,Bilirubin total,24325-3,Hepatic function 2000 panel - Serum or Plasma
+2885-2,Protein total,24325-3,Hepatic function 2000 panel - Serum or Plasma
+10834-0,Globulin (calculated),24325-3,Hepatic function 2000 panel - Serum or Plasma
+5794-3,Hemoglobin urine strip,24356-8,Urinalysis complete panel - Urine
+2514-8,Ketones urine strip,24356-8,Urinalysis complete panel - Urine
+5799-2,Leukocyte esterase,24356-8,Urinalysis complete panel - Urine
+5802-4,Nitrite,24356-8,Urinalysis complete panel - Urine
+5811-5,Specific gravity,24356-8,Urinalysis complete panel - Urine
+5803-2,pH urine,24356-8,Urinalysis complete panel - Urine
+5770-3,Bilirubin urine strip,24356-8,Urinalysis complete panel - Urine
+25428-4,Glucose urine strip,24356-8,Urinalysis complete panel - Urine
+20454-5,Protein urine strip,24356-8,Urinalysis complete panel - Urine
+5792-7,Glucose urine mass,24356-8,Urinalysis complete panel - Urine
+5804-0,Protein urine mass,24356-8,Urinalysis complete panel - Urine
+5767-9,Appearance,24356-8,Urinalysis complete panel - Urine
+20505-4,Bilirubin urine mass,24356-8,Urinalysis complete panel - Urine
+32167-9,Clarity,24356-8,Urinalysis complete panel - Urine
+5778-6,Color,24356-8,Urinalysis complete panel - Urine
+5797-6,Ketones urine mass,24356-8,Urinalysis complete panel - Urine
+34533-0,Odor,24356-8,Urinalysis complete panel - Urine
+5769-5,Bacteria sediment,24356-8,Urinalysis complete panel - Urine
+24124-0,Casts sediment,24356-8,Urinalysis complete panel - Urine
+5787-7,Epithelial cells sediment,24356-8,Urinalysis complete panel - Urine
+13945-1,Erythrocytes sediment,24356-8,Urinalysis complete panel - Urine
+5821-4,Leukocytes sediment,24356-8,Urinalysis complete panel - Urine
+8247-9,Mucus sediment,24356-8,Urinalysis complete panel - Urine
+718-7,Hemoglobin,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+788-0,RDW,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+789-8,Erythrocytes,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+6690-2,Leukocytes,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+785-6,MCH,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+786-4,MCHC,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+787-2,MCV,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+777-3,Platelets,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+4544-3,Hematocrit,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+32623-1,Platelet mean volume,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+32207-3,Platelet distribution width,58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+20570-8,Hematocrit (calculated),58410-2,Complete blood count (hemogram) panel - Blood by Automated count
+704-7,Basophils #,57021-8,CBC W Auto Differential panel - Blood
+706-2,Basophils %,57021-8,CBC W Auto Differential panel - Blood
+711-2,Eosinophils #,57021-8,CBC W Auto Differential panel - Blood
+713-8,Eosinophils %,57021-8,CBC W Auto Differential panel - Blood
+731-0,Lymphocytes #,57021-8,CBC W Auto Differential panel - Blood
+736-9,Lymphocytes %,57021-8,CBC W Auto Differential panel - Blood
+742-7,Monocytes #,57021-8,CBC W Auto Differential panel - Blood
+5905-5,Monocytes %,57021-8,CBC W Auto Differential panel - Blood
+751-8,Neutrophils #,57021-8,CBC W Auto Differential panel - Blood
+770-8,Neutrophils %,57021-8,CBC W Auto Differential panel - Blood
+2093-3,Cholesterol total,57698-3,Lipid panel with direct LDL - Serum or Plasma
+2085-9,HDL,57698-3,Lipid panel with direct LDL - Serum or Plasma
+18262-6,LDL direct,57698-3,Lipid panel with direct LDL - Serum or Plasma
+2571-8,Triglyceride,57698-3,Lipid panel with direct LDL - Serum or Plasma
+1960-4,Bicarbonate,24336-0,Gas panel - Arterial blood
+2019-8,pCO2,24336-0,Gas panel - Arterial blood
+2703-7,pO2,24336-0,Gas panel - Arterial blood
+2744-1,pH,24336-0,Gas panel - Arterial blood
+14627-4,Bicarbonate,24339-4,Gas panel - Venous blood
+2027-1,Carbon dioxide total,24339-4,Gas panel - Venous blood
+2021-4,pCO2,24339-4,Gas panel - Venous blood
+2705-2,pO2,24339-4,Gas panel - Venous blood
+2746-6,pH,24339-4,Gas panel - Venous blood
+8462-4,Diastolic blood pressure (a vital sign),NOT-LAB,Not a laboratory test - no lab report
+10230-1,Left ventricular ejection fraction (an imaging measurement),NOT-LAB,Not a laboratory test - no lab report

@@ -106,26 +106,26 @@ GROUP BY subject_link, encounter_link, requester_link;
 -- 4. Active vs completed, and the most common drugs
 WITH m AS (
     SELECT fhir_id,
-           MAX(CASE WHEN field_name = 'status'       THEN actual_value END) AS status,
-           MAX(CASE WHEN field_name = 'code'         THEN actual_value END) AS rxnorm_code,
-           MAX(CASE WHEN field_name = 'code_display' THEN actual_value END) AS description
+           MAX(CASE WHEN field_name = 'status'       THEN actual_value END) AS status
     FROM tgt.medication_resources
     WHERE resource_type = 'MedicationRequest'
     GROUP BY fhir_id
 )
 SELECT status, COUNT(*) AS prescriptions FROM m GROUP BY status;
 
+-- Since Phase 3 step 4 each prescription points to a Medication (the drug catalogue):
+-- the drug's name is the reference's display; its RxNorm code is on the Medication.
 WITH m AS (
     SELECT fhir_id,
-           MAX(CASE WHEN field_name = 'code'         THEN actual_value END) AS rxnorm_code,
-           MAX(CASE WHEN field_name = 'code_display' THEN actual_value END) AS description
+           MAX(CASE WHEN field_name = 'medication_ref'     THEN actual_value END) AS medication_ref,
+           MAX(CASE WHEN field_name = 'medication_display' THEN actual_value END) AS description
     FROM tgt.medication_resources
     WHERE resource_type = 'MedicationRequest'
     GROUP BY fhir_id
 )
-SELECT TOP (10) rxnorm_code, description, COUNT(*) AS prescriptions
+SELECT TOP (10) m.medication_ref, m.description, COUNT(*) AS prescriptions
 FROM m
-GROUP BY rxnorm_code, description
+GROUP BY m.medication_ref, m.description
 ORDER BY prescriptions DESC;
 
 -- 4b. Rules triggered
