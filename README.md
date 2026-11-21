@@ -26,9 +26,11 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 **Result, Phase 3 (appointments):** 68 legacy rows, 100% accounted for · **67 Appointments migrated** (1 duplicate removed) · **871 of 871 field values matched** · every visit linked to its patient, provider and clinic location, and every infusion to its prior authorization · a go-live safety check of the active schedule found **0 unsafe visits** after remediation (nobody deceased, clinic open, no double bookings, every infusion authorized) · 8 of 8 planted defects caught, then corrected.
 
-**Total proven so far: 549,910 field values, 0 mismatches.**
+**Result, Phase 3 (drug catalogue and lab reports):** **109 Medications**, one per drug, with all **2,824 prescriptions re-pointed** to them and the Phase 2 prescription reconciliation re-proven at 100% · **2,024 lab DiagnosticReports** (1,334 panels, 690 single tests) built from 15,441 migrated lab results, each result in exactly one report · **16,737 of 16,737 field values** and **15,441 of 15,441 result links** matched · 6 miscategorized Phase 2 observations found here and corrected at the source.
 
-> **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. **Phase 3** (the open work carried across on go-live day) has its core in place: referrals (ServiceRequest), prior authorizations (Claim + ClaimResponse) and appointments (Appointment) are done. See [Scope and phases](#scope-and-phases).
+**Total proven: 566,647 field values, 0 mismatches.**
+
+> **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. **Phase 3** (the open work carried across on go-live day) is complete: referrals (ServiceRequest), prior authorizations (Claim + ClaimResponse), appointments (Appointment), a drug catalogue (Medication) and lab reports (DiagnosticReport). Medication administration and clinical documents are out of scope: the legacy export holds no data for them. See [Scope and phases](#scope-and-phases).
 
 ![Reconciliation dashboard after remediation](docs/dashboard.png)
 
@@ -490,6 +492,47 @@ An appointment is the last piece of open work, and it links to almost everything
 
 **Remediation.** 6 problems joined the shared worklist (2 rejects, 4 flags); all were corrected and migrated. A moved visit needs two corrections, `START` and `END`, or it would end before it starts.
 
+### Phase 3, step 4: Drug catalogue (Medication)
+
+Phase 2 wrote the drug's RxNorm code and name into every prescription. Here each distinct drug becomes **one Medication record**, and every MedicationRequest now **points to it** (`medicationReference`) instead of repeating the code and name - the way many EHRs store drugs. Medication is a **derived** resource: it has no legacy file of its own, so it is built from the curated prescriptions and has no plant step; its test cases are the real findings of the profile.
+
+| Medication field | Comes from |
+|---|---|
+| `identifier`, `code` | the RxNorm `CODE` and its name (one name per drug) |
+| `form` | the dose form found in the name, through a reviewable keyword map (`docs/dose_form_map.csv`); a `{…} Pack` is a Pack |
+| `status` | active |
+
+| Check | Result |
+|---|---|
+| Catalogue | **109 drugs** = 109 distinct codes = 109 on the server; every drug used by at least one migrated prescription: **PASS** |
+| Field reconciliation | **545 of 545** values matched (109 × 5 fields) |
+| Re-pointing | **2,824 of 2,824** prescriptions point to the Medication of their own drug |
+| Regression | the Phase 2 prescription reconciliation re-run after the change: still **PASS**, 31,064 of 31,064 values |
+
+**Two drug-name decisions.** One code (1000126) appears with two spellings, `medroxyPROGESTERone` and `medroxyprogesterone`. The mixed capitals are **Tall Man lettering**, a drug-safety convention that marks the different part of look-alike drug names, so that spelling is kept. One drug, `doxycycline hyclate 100 MG` (RxNorm 1649987), has no dose form - correctly: that code is the ingredient and strength only (the capsule and the tablet have their own codes). It is flagged, not "fixed", because choosing a form would be guessing.
+
+### Phase 3, step 5: Lab reports (DiagnosticReport)
+
+A DiagnosticReport is what a lab sends back: "Lipid panel, 2024-03-02, results: cholesterol, HDL, LDL, triglycerides". It **points to** the Observations migrated in Phase 2 (`result`) and does not copy their values. Like Medication, it is derived, with no plant step.
+
+How results become reports:
+1. Lab results with the same visit and date-time form one blood draw (717 draws).
+2. Each test is assigned its panel through a reviewable map (`docs/lab_panel_map.csv`, 84 tests: basic and comprehensive metabolic, hepatic, urinalysis, CBC, lipid, blood gases). A test in no panel gets its own single-test report (an HbA1c, a TSH).
+3. Panels in the same draw are combined (`docs/lab_panel_combine.csv`): a basic metabolic panel plus a hepatic function panel is **one comprehensive metabolic panel**, not two - in billing terms, reporting them separately would be unbundling (CPT 80048 + 80076 instead of 80053).
+
+| Check | Result |
+|---|---|
+| Coverage | **15,441** migrated lab results: each in exactly one report, 0 in two reports, 0 unplaced: **PASS** |
+| Reports | **2,024** built and on the server: 1,334 panels (286 comprehensive metabolic, 255 urinalysis, 234 CBC, 231 lipid, …) and 690 single tests |
+| Field reconciliation | **16,192 of 16,192** values matched (2,024 × 8 fields) |
+| Result integrity | **15,441 of 15,441** results listed by the right report, none missing, none extra; every report on the same patient and visit as its results |
+
+**A later step found an earlier defect.** Building the lab reports surfaced 6 results labelled `laboratory` that are not lab tests: 2 diastolic blood pressures (vital signs) and 4 left-ventricular ejection fractions (from echocardiograms: imaging). Leaving them out of the reports only hid the problem, since the Phase 2 Observations still carried the wrong category. They were corrected **at the source**, through the same `corrections.csv` process, and both reconciliations were re-run at 100%. An independent check confirms the fix: diastolic and systolic blood pressure now both total **575** observations, as paired readings should.
+
+### Out of scope: medication administration and clinical documents
+
+**MedicationAdministration** (a record that a dose was actually given) and **DocumentReference** (visit notes, letters, scanned documents) are not migrated. The legacy export holds prescriptions, not administrations, and no documents; creating either would mean inventing clinical records rather than migrating them.
+
 ---
 ## Scope and phases
 
@@ -497,13 +540,13 @@ Real EHR conversions are usually done in phases: the core records are moved and 
 
 - **Phase 1 is complete:** patients, visits and diagnoses, with every rejected record corrected or archived.
 - **Phase 2 is complete:** the clinic structure (providers, their roles, the clinic and its location), every visit linked to its provider and the clinic, current insurance, and the clinical history (procedures, allergies, prescriptions, vital signs and lab results), each reconciled and remediated.
-- **Phase 3's core is complete:** the "open work" a clinic carries across on go-live day (see below): referrals, prior authorizations and appointments. Documents, results and medication administration remain planned.
+- **Phase 3 is complete:** the "open work" a clinic carries across on go-live day (referrals, prior authorizations, appointments), plus a drug catalogue and lab reports built from Phase 2's records. Medication administration and clinical documents are out of scope: the legacy export has no data for them.
 
 | Phase | FHIR resources | Source data | Status |
 |---|---|---|---|
 | **1** | Patient, Encounter, Condition | Synthea `patients.csv`, `encounters.csv`, `conditions.csv` | **Done**: 100% of rows accounted for, 44,765 of 44,765 values matched |
 | **2** | **Clinic structure:** Practitioner, PractitionerRole, Organization, Location<br>**Insurance:** Coverage<br>**Clinical:** AllergyIntolerance, Observation, Procedure, MedicationRequest | Synthea `providers.csv`, `organizations.csv`, `payers.csv`, `payer_transitions.csv`, `allergies.csv`, `observations.csv`, `procedures.csv`, `medications.csv` | **Done.** Practitioner done (185 rows → 184 migrated, 1 duplicate removed; 2,208 of 2,208 values matched). Clinic structure done (1 Organization, 1 Location, 184 PractitionerRoles; 1,126 of 1,126 values matched). All 3,563 visits linked to provider and clinic (14,252 of 14,252). Coverage done (2,308 rows accounted for; 58 Coverages; 558 of 558 values matched). Procedure done (8,620 migrated; 77,580 of 77,580 values matched). AllergyIntolerance done (66 migrated; 1,122 of 1,122 values matched). MedicationRequest done (2,824 migrated, full history; 31,064 of 31,064 values matched). Observation done (34,138 migrated; 375,518 of 375,518 values matched) |
-| **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export. Appointments, referrals and prior authorizations are generated by `generate_phase3_legacy.py` from the migrated patients, providers, conditions, procedures, prescriptions and coverage. Documents and results would need the source EHR's data | **In progress.** ServiceRequest (referrals) done (38 rows → 37 migrated, 1 duplicate removed; 481 of 481 values matched). Claim + ClaimResponse (prior authorizations) done (18 rows → 17 Claims and 12 ClaimResponses, 1 duplicate removed; 365 of 365 values matched). Appointment done (68 rows → 67 migrated, 1 duplicate removed; 871 of 871 values matched; 0 unsafe visits at go-live). Documents, results and medication administration planned |
+| **3** | **Scheduling:** Appointment<br>**Referrals and orders:** ServiceRequest<br>**Prior authorization:** Claim (use = preauthorization), ClaimResponse<br>**Documents and results:** DocumentReference, DiagnosticReport<br>**Medications:** MedicationAdministration, Medication (as a separate resource) | Not in Synthea's CSV export. Appointments, referrals and prior authorizations are generated by `generate_phase3_legacy.py` from the migrated patients, providers, conditions, procedures, prescriptions and coverage. Medication and DiagnosticReport are built from the migrated prescriptions and lab results. Documents and medication administrations are not in the legacy export | **Complete.** ServiceRequest (referrals) done (38 rows → 37 migrated, 1 duplicate removed; 481 of 481 values matched). Claim + ClaimResponse (prior authorizations) done (18 rows → 17 Claims and 12 ClaimResponses, 1 duplicate removed; 365 of 365 values matched). Appointment done (68 rows → 67 migrated, 1 duplicate removed; 871 of 871 values matched; 0 unsafe visits at go-live). Medication done (109 drugs, 545 of 545 values; 2,824 prescriptions re-pointed). DiagnosticReport done (2,024 lab reports from 15,441 results; 16,192 of 16,192 values, 15,441 result links). DocumentReference and MedicationAdministration out of scope (no source data) |
 
 **Why Phase 1 comes first:** every other resource points back to a patient, and most point to a visit. They cannot be loaded until those exist. This is the same dependency that causes cascade rejects in this project.
 
@@ -730,6 +773,19 @@ python src\phase3_appointment.py
 
 Open `sql\30_appointment_reconciliation.sql` in SSMS and press **F5**, then run `export_worklist.py`. Grid 5 is the go-live safety check. A rebooked visit needs two lines in `corrections.csv`: `START` and `END`.
 
+### 47–50. Phase 3: Drug catalogue and lab reports
+
+```powershell
+python src\profile_medication_report.py     # read-only profile of drugs and lab results
+python src\list_lab_tests.py                # every lab test, to review docs\lab_panel_map.csv
+python src\phase3_medication.py             # one Medication per drug
+python src\phase2_medication.py             # re-points every prescription to its Medication
+python src\phase3_diagnostic_report.py --limit 1
+python src\phase3_diagnostic_report.py
+```
+
+Open `sql\31_medication_catalogue_reconciliation.sql`, `sql\26_medication_reconciliation.sql` (regression) and `sql\32_diagnostic_report_reconciliation.sql` in SSMS and press **F5** on each.
+
 > **Tip:** if a test description contains a comma, the CSV wraps it in quotes; count the quoted text as one value when finding a column by position.
 
 > **Note:** the pipeline uses the public HAPI FHIR test server (`https://hapi.fhir.org/baseR4`). It is shared and reset from time to time, so FHIR IDs will differ on every run. Only load synthetic data to a public server.
@@ -765,6 +821,9 @@ fhir-migration-project/
 │   ├── payer_type_map.csv   Payer name -> Source of Payment Typology code
 │   ├── referral_specialty_map.csv  Condition keyword -> referral specialty (NUCC)
 │   ├── visit_type_map.csv   Legacy visit type -> HL7 appointment type
+│   ├── dose_form_map.csv    Keyword in a drug name -> dose form
+│   ├── lab_panel_map.csv    Lab test (LOINC) -> lab panel (LOINC)
+│   ├── lab_panel_combine.csv  Panels ordered together -> one combined panel
 │   ├── source_to_target_mapping.xlsx
 │   └── specialty_map.csv    Legacy specialty text -> NUCC provider taxonomy code
 ├── powerbi/
@@ -788,6 +847,8 @@ fhir-migration-project/
 │   ├── 28_referral_reconciliation.sql
 │   ├── 29_prior_auth_reconciliation.sql
 │   ├── 30_appointment_reconciliation.sql
+│   ├── 31_medication_catalogue_reconciliation.sql
+│   ├── 32_diagnostic_report_reconciliation.sql
 │   └── diagnosis_count_check.sql   Data profiling: distinct diagnoses per patient, with the list (raw stg data)
 ├── src/
 │   ├── first_call.py
@@ -821,7 +882,11 @@ fhir-migration-project/
 │   ├── phase3_prior_auth.py
 │   ├── profile_appointments.py
 │   ├── plant_appointment_errors.py
-│   └── phase3_appointment.py
+│   ├── phase3_appointment.py
+│   ├── profile_medication_report.py
+│   ├── list_lab_tests.py
+│   ├── phase3_medication.py
+│   └── phase3_diagnostic_report.py
 ├── requirements.txt
 └── README.md
 ```
@@ -856,6 +921,9 @@ fhir-migration-project/
 - **Regression testing.** After any change to migrated records, the earlier reconciliation is re-run; Phase 1 still matched 44,765 of 44,765 after the visit links were added.
 - **Prove links, not just counts.** The clinic-structure reconciliation checks that each role points to the practitioner migrated from the *same* legacy provider, so a role attached to the wrong person would fail even if every count matched.
 - **Exact comparison.** Field reconciliation uses a binary collation and a NULL-safe comparison, and compares against the corrected values, so differences in case, whitespace or unapproved changes are not hidden.
+- **Derive, don't invent.** Medication and DiagnosticReport are built from records already migrated and reconciled, and point to them rather than copying them; resources with no source data (administrations, documents) are left out and the reason is stated.
+- **Code like a coder.** Lab panels ordered together are reported as the panel that was ordered (one comprehensive metabolic panel, not a basic plus a hepatic one), and a drug name is not given a dose form its code does not have.
+- **Fix defects where they start.** A problem found in a later step (lab reports) was corrected in the earlier records (Phase 2 observations) and both steps were re-reconciled, rather than patched over downstream.
 - **Check the standard before extending it.** An extension is used only when FHIR truly lacks a field (the referral's legacy status); when FHIR already has one (the patient's confirmation of an appointment, as the participant's status), the standard field is used.
 - **Prove the data is safe to use, not only correct.** The appointment reconciliation checks the go-live schedule itself: no visits for deceased patients, on clinic holidays, double-booked, or for services without a valid authorization.
 - **A record is only as current as its extract date.** A payer decision dated after the extract cannot be in a legacy export, and an approval that ended before it is expired, however it is labelled. Both are judged against the extract date (2026-10-10), not today's date.
@@ -886,12 +954,14 @@ fhir-migration-project/
 | Referral conversion (ServiceRequest, NUCC specialties, FHIR extensions, diagnosis validation against the problem list) | `phase3_referral.py`, `sql/28_referral_reconciliation.sql` |
 | Prior authorization conversion (Claim + ClaimResponse, payer and policy links, expired and incomplete approvals) - revenue-cycle knowledge applied to migration | `phase3_prior_auth.py`, `sql/29_prior_auth_reconciliation.sql` |
 | Scheduling conversion (Appointment, participant statuses, go-live safety checks: deceased patients, clinic days, double booking, authorization) | `phase3_appointment.py`, `sql/30_appointment_reconciliation.sql` |
+| Derived resources: drug catalogue (Medication, RxNorm, Tall Man lettering) and lab reports (DiagnosticReport, LOINC panels, no unbundling) | `phase3_medication.py`, `phase3_diagnostic_report.py`, `sql/31_…`, `sql/32_…` |
+| Regression testing after a change to migrated data | `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql` |
 | Synthetic test-data generation (seeded, rule-based, linked to migrated records) | `generate_phase3_legacy.py` |
 | SQL query optimization (indexes, covering `INCLUDE` columns): 50+ minutes to 4 seconds | `sql/27_observation_reconciliation.sql` |
 | Referential integrity across FHIR resources | `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql` (visit → practitioner → role → clinic) |
 | Safe updates to live records (optimistic locking), regression testing | `phase2_encounter_links.py` (`ifMatch`), Phase 1 reconciliation re-run |
 | Exception remediation workflow, audit trail | `export_worklist.py`, `apply_corrections.py`, `etl.corrections` |
-| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql`, `sql/28_referral_reconciliation.sql`, `sql/29_prior_auth_reconciliation.sql`, `sql/30_appointment_reconciliation.sql` |
+| Reconciliation and validation in T-SQL | `sql/10_reconciliation.sql`, `sql/12_remediation.sql`, `sql/20_practitioner_reconciliation.sql`, `sql/21_clinic_structure_reconciliation.sql`, `sql/22_encounter_link_reconciliation.sql`, `sql/23_coverage_reconciliation.sql`, `sql/24_procedure_reconciliation.sql`, `sql/25_allergy_reconciliation.sql`, `sql/26_medication_reconciliation.sql`, `sql/27_observation_reconciliation.sql`, `sql/28_referral_reconciliation.sql`, `sql/29_prior_auth_reconciliation.sql`, `sql/30_appointment_reconciliation.sql`, `sql/31_medication_catalogue_reconciliation.sql`, `sql/32_diagnostic_report_reconciliation.sql` |
 | Power BI (DAX, data modeling, reporting) | `powerbi/` |
 | HIPAA-aware design, audit logging | Data minimization, corrections log, load log, run timestamps |
 
