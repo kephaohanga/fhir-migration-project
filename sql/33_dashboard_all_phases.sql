@@ -187,10 +187,10 @@ SELECT CASE WHEN c.table_name IN ('patients', 'encounters', 'conditions') THEN '
             ELSE 'Phase 2' END                                            AS phase,
        c.table_name, c.source_row, c.rule_id, c.field_name, c.disposition, c.corrected_by, c.applied_at,
        CASE
-           WHEN c.disposition = 'Archive' OR c.rule_id IN ('R-PA01', 'R-RF01', 'R-AP01')  THEN 'Health Information Management (HIM)'
-           WHEN c.rule_id IN ('R-P01', 'R-P02', 'R-P03', 'R-P04', 'R-CV01')            THEN 'Patient Access / Registration'
-           WHEN c.rule_id IN ('R-CV02', 'R-CV03', 'R-CV04', 'R-CV05', 'R-PA02')        THEN 'Patient Access / Insurance Verification'
-           WHEN c.rule_id LIKE 'R-PR%' OR c.rule_id IN ('R-RF02', 'R-AP03')           THEN 'Credentialing / Provider Enrollment'
+           WHEN c.disposition = 'Archive' OR c.rule_id IN ('R-PA01', 'R-RF01', 'R-AP01')  THEN 'HIM'
+           WHEN c.rule_id IN ('R-P01', 'R-P02', 'R-P03', 'R-P04', 'R-CV01')            THEN 'Registration'
+           WHEN c.rule_id IN ('R-CV02', 'R-CV03', 'R-CV04', 'R-CV05', 'R-PA02')        THEN 'Insurance Verification'
+           WHEN c.rule_id LIKE 'R-PR%' OR c.rule_id IN ('R-RF02', 'R-AP03')           THEN 'Credentialing'
            WHEN c.rule_id IN ('R-C01', 'R-C02', 'R-PC04')                              THEN 'Coding'
            WHEN c.rule_id IN ('R-MD04')                                                THEN 'Pharmacy'
            WHEN c.rule_id IN ('R-OB06')                                                THEN 'Laboratory'
@@ -198,7 +198,7 @@ SELECT CASE WHEN c.table_name IN ('patients', 'encounters', 'conditions') THEN '
            WHEN c.rule_id IN ('R-RF03', 'R-RF05', 'R-PA03')                            THEN 'Referral Coordinator'
            WHEN c.rule_id LIKE 'R-PA%' OR c.rule_id = 'R-AP08'                         THEN 'Prior Authorization'
            WHEN c.rule_id IN ('R-AP02', 'R-AP04', 'R-AP05', 'R-AP06', 'R-AP07')        THEN 'Scheduling'
-           ELSE 'Health Information Management (HIM)'
+           ELSE 'HIM'
        END                                                                AS owner_team
 FROM etl.corrections AS c;
 GO
@@ -223,3 +223,15 @@ FROM rpt.v_dash_rules GROUP BY phase, action ORDER BY phase, action;
 -- 3. Corrections by team  (expect 55 corrections in total, 1 of them an Archive)
 SELECT owner_team, disposition, COUNT(*) AS corrections
 FROM rpt.v_dash_corrections GROUP BY owner_team, disposition ORDER BY corrections DESC;
+GO
+
+-- Footer: when the pipeline last pulled data from the FHIR server, and when the report refreshed
+CREATE OR ALTER VIEW rpt.v_dash_run_info AS
+SELECT DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), MAX(t.create_date))
+                         AS fhir_extract_utc,
+       SYSUTCDATETIME()  AS report_refreshed_utc
+FROM sys.tables AS t
+WHERE SCHEMA_NAME(t.schema_id) = 'tgt';
+GO
+
+SELECT * FROM rpt.v_dash_run_info;
