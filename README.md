@@ -32,7 +32,7 @@ An end-to-end healthcare data migration project: extract records from a simulate
 
 > **Scope:** **Phase 1** (Patient, Encounter, Condition) and **Phase 2** are complete. Phase 2 added the clinic structure (Practitioner, Organization, Location, PractitionerRole), linked every visit to it, and migrated each patient's current insurance (Coverage), procedures (Procedure), allergies (AllergyIntolerance), prescriptions (MedicationRequest) and observations (Observation). Each record now connects: patient → visit → provider → role → clinic, patient → coverage → payer, and every clinical record → patient and visit. **Phase 3** (the open work carried across on go-live day) is complete: referrals (ServiceRequest), prior authorizations (Claim + ClaimResponse), appointments (Appointment), a drug catalogue (Medication) and lab reports (DiagnosticReport). Medication administration and clinical documents are out of scope: the legacy export holds no data for them. See [Scope and phases](#scope-and-phases).
 
-![Reconciliation dashboard after remediation](docs/dashboard.png)
+![All phases reconciliation dashboard: 16 of 16 steps PASS, 566,647 field values matched, 65 of 65 planted defects caught](docs/dashboard.png)
 
 > **All data is synthetic.** Patients were generated with [Synthea](https://github.com/synthetichealth/synthea), and no real patient information (PHI) was used at any point. The legacy files in `data/` include SSN, driver's license and passport columns because Synthea generates them; their values are fake, and the pipeline deliberately drops these columns at ingestion (see *Data minimization* below).
 
@@ -131,7 +131,11 @@ flowchart LR
 
 ## Results
 
-### Row reconciliation: first pass vs. after remediation
+### Phase 1: Patients, visits and diagnoses (Patient, Encounter, Condition)
+
+Phase 1 migrated the core of the record that every later resource points back to: the patients, their visits and their diagnoses. Nine defects were planted in the legacy files (7 in patients, 1 in encounters, 1 in conditions) to test the rules.
+
+#### Row reconciliation: first pass vs. after remediation
 
 `source rows = migrated + rejected (direct) + rejected (cascade) + duplicates removed`
 
@@ -144,7 +148,7 @@ flowchart LR
 
 On the first pass, 5 records were rejected directly, and they blocked **196 others** as cascade rejects. A *cascade* reject is a child record whose parent was rejected. For example, an encounter for a patient with no valid birth date cannot be loaded without its patient.
 
-### Remediation
+#### Remediation
 
 Instead of treating rejection as the end state, every rejected record was worked to a documented outcome:
 
@@ -158,7 +162,7 @@ Instead of treating rejection as the end state, every rejected record was worked
 
 The worklist ranks problems by how many records each one blocks, so the **5 root-cause fixes released all 196 blocked records**. Every correction is recorded in `etl.corrections` with the original value, the new value, who made it, when and why.
 
-### Field reconciliation after remediation
+#### Field reconciliation after remediation
 
 | Resource | Fields compared | Values compared | Mismatches | Match |
 | --- | ---: | ---: | ---: | ---: |
@@ -170,7 +174,7 @@ The worklist ranks problems by how many records each one blocks, so the **5 root
 **Load:** every bundle accepted, 0 failures. On the re-run, conditional create (`ifNoneExist`) recognized the records already loaded and created only the newly corrected ones, with no duplicates.
 
 <details>
-<summary>Dashboard before remediation (first pass)</summary>
+<summary>Phase 1 dashboard before remediation (first pass)</summary>
 
 ![Reconciliation dashboard before remediation](docs/dashboard_before_remediation.png)
 
